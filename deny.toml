@@ -47,11 +47,6 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
 ]
 
-[advisories]
-version = 2
-# Unmaintained (not vulnerable) crates pulled in transitively by the frozen
-# Tauri 2.x stack. None is reachable as an attack surface for our use; each
-# is re-evaluated when we bump Tauri. Sourced advisories stay denied.
 # Anything unidentifiable with high confidence fails the build.
 confidence-threshold = 0.9
 
