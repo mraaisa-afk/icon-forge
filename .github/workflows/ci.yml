@@ -17,7 +17,7 @@ env:
 
 jobs:
   windows-primary:
-    name: Windows (primary): build + tests + benchmark + corpus consistency + wasm gate + license
+    name: "Windows (primary): build + tests + benchmark + corpus consistency + wasm gate + license"
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -75,7 +75,7 @@ jobs:
           command: check
 
   ubuntu-quick:
-    name: Ubuntu (quick): wasm gate + debug build
+    name: "Ubuntu (quick): wasm gate + debug build"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
