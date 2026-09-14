@@ -1,0 +1,23 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Offline vendor tree (built by scripts/fetch_vendor.py; NOT part of the repo)
+/vendor
+# Offline cargo source replacement — NEVER commit (breaks every non-sandbox
+# build); see .cargo/config.vendor.toml.example
+.cargo/config.toml
+.cargo/config.local.toml
+
+# Generated corpus cache (the committed corpus lives in bench/corpus)
+/tmp-gen-corpus
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Frontend (phases 4+)
+node_modules/
+dist/

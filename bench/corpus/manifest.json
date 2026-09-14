@@ -1,0 +1,121 @@
+{
+  "corpus": "icon-forge/bench",
+  "generated_by": "isg-gen-corpus (deterministic, fixed seed, integer rasterization)",
+  "sheets": [
+    {
+      "expected_groups": 16,
+      "file": "01_basic_grid.png",
+      "height": 512,
+      "truth": "01_basic_grid.json",
+      "width": 512
+    },
+    {
+      "expected_groups": 36,
+      "file": "02_mixed_grid.png",
+      "height": 768,
+      "truth": "02_mixed_grid.json",
+      "width": 768
+    },
+    {
+      "expected_groups": 25,
+      "file": "03_rings_holes.png",
+      "height": 640,
+      "truth": "03_rings_holes.json",
+      "width": 640
+    },
+    {
+      "expected_groups": 30,
+      "file": "04_scattered.png",
+      "height": 768,
+      "truth": "04_scattered.json",
+      "width": 768
+    },
+    {
+      "expected_groups": 64,
+      "file": "05_dense_grid.png",
+      "height": 896,
+      "truth": "05_dense_grid.json",
+      "width": 896
+    },
+    {
+      "expected_groups": 16,
+      "file": "06_thick_strokes.png",
+      "height": 640,
+      "truth": "06_thick_strokes.json",
+      "width": 640
+    },
+    {
+      "expected_groups": 9,
+      "file": "07_size_range.png",
+      "height": 512,
+      "truth": "07_size_range.json",
+      "width": 512
+    },
+    {
+      "expected_groups": 25,
+      "file": "08_grid_drift.png",
+      "height": 768,
+      "truth": "08_grid_drift.json",
+      "width": 768
+    },
+    {
+      "expected_groups": 20,
+      "file": "09_near_touching.png",
+      "height": 640,
+      "truth": "09_near_touching.json",
+      "width": 640
+    },
+    {
+      "expected_groups": 12,
+      "file": "10_edge_corner.png",
+      "height": 640,
+      "truth": "10_edge_corner.json",
+      "width": 640
+    },
+    {
+      "expected_groups": 1024,
+      "file": "11_c1_batch_grid.png",
+      "height": 4096,
+      "truth": "11_c1_batch_grid.json",
+      "width": 4096
+    },
+    {
+      "expected_groups": 100,
+      "file": "12_c2_latency_grid.png",
+      "height": 4096,
+      "keystone": true,
+      "truth": "12_c2_latency_grid.json",
+      "width": 4096
+    },
+    {
+      "expected_groups": 25,
+      "file": "13_c7_jpeg_grid.jpg",
+      "height": 768,
+      "truth": "13_c7_jpeg_grid.json",
+      "width": 768
+    },
+    {
+      "expected_groups": 16,
+      "file": "14_c8_colour_icons.png",
+      "height": 512,
+      "truth": "14_c8_colour_icons.json",
+      "width": 512
+    },
+    {
+      "expected_groups": 16,
+      "file": "15_c9_duplicates.png",
+      "height": 512,
+      "truth": "15_c9_duplicates.json",
+      "width": 512
+    },
+    {
+      "expected_groups": 20,
+      "file": "16_c10_noisy_scan.png",
+      "height": 640,
+      "truth": "16_c10_noisy_scan.json",
+      "width": 640
+    }
+  ],
+  "total_icons": 1454,
+  "version": "0.1.0"
+}

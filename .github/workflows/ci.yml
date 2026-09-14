@@ -1,0 +1,105 @@
+# Icon Forge CI — Windows-first (the only shipping platform).
+#
+# * windows-latest: primary leg — build, tests (incl. the Phase 0 exit
+#   criteria gate over bench/corpus), the spike benchmark, corpus
+#   regeneration consistency, the wasm32 keystone check, license policy.
+# * ubuntu-latest: trivial fast leg — wasm32 keystone check + debug build,
+#   for quick signal (kept minimal by design; no macOS/Linux packaging).
+name: CI
+
+on:
+  push:
+    branches: [main, "arena/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-primary:
+    name: Windows (primary): build + tests + benchmark + corpus consistency + wasm gate + license
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt clippy
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target
+          key: cargo-win-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-win-${{ runner.os }}-
+
+      - name: Check (release, workspace)
+        run: cargo check --workspace --release
+
+      - name: Tests (release) — includes the Phase 0 exit-criteria gate
+        run: cargo test --workspace --release
+
+      - name: Corpus regeneration consistency (truth JSONs must be byte-identical)
+        shell: bash
+        run: |
+          cargo run -p isg-gen-corpus --release -- --out target/regen-corpus
+          status=0
+          for f in target/regen-corpus/*.json; do
+            diff -u "bench/corpus/$(basename "$f")" "$f" || status=1
+          done
+          exit $status
+
+      - name: Spike benchmark — Phase 0 exit gate (exact counts, C2 keystone <= 2.0 s; JSON report in logs)
+        run: cargo run -p isg-spike-groupall --release -- --corpus bench/corpus --json
+
+      - name: Keystone: isg-core compiles for wasm32-unknown-unknown
+        run: cargo check --target wasm32-unknown-unknown -p isg-core
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (workspace, release)
+        run: cargo clippy --workspace --release -- -D warnings
+
+      - name: License policy (cargo-deny: GPL/AGPL hard ban)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  ubuntu-quick:
+    name: Ubuntu (quick): wasm gate + debug build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target
+          key: cargo-linux-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-
+
+      - name: Keystone: isg-core compiles for wasm32-unknown-unknown
+        run: cargo check --target wasm32-unknown-unknown -p isg-core
+
+      - name: Debug build (workspace)
+        run: cargo build --workspace

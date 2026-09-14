@@ -1,0 +1,61 @@
+# cargo-deny policy — hard licensing constraints (Phase 0, enforced in CI).
+#
+# * GPL/AGPL (any version) are banned outright — the app must stay free of
+#   copyleft contamination (never potrace / autotrace).
+# * resvg (MPL-2.0) is allowed unmodified, behind an adapter (Phase 2).
+# * The allow-list below is deliberately narrow; adding a license family is a
+#   decision, not a default.
+#
+# This file must live at the repo root as `deny.toml` — that is the filename
+# cargo-deny (and cargo-deny-action) reads by default.
+
+[graph]
+# Skip heavy graph walks we don't need yet.
+all-features = false
+
+[licenses]
+# Only these licenses may appear anywhere in the resolved graph.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+]
+# Copyleft (GPL, AGPL, LGPL and friends) is denied even if a version slips
+# through a renamed license string.
+copyleft = "deny"
+# Anything unidentifiable with high confidence fails the build.
+confidence-threshold = 0.9
+# Explicit hard ban (defense in depth on top of copyleft = "deny").
+deny = [
+    "GPL-2.0",
+    "GPL-2.0-or-later",
+    "GPL-3.0",
+    "GPL-3.0-or-later",
+    "AGPL-3.0",
+    "AGPL-3.0-or-later",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "SSPL-1.0",
+]
+
+[bans]
+# Duplicate major versions are a review-time smell, not a hard fail (the
+# flo_curves 0.3 + 0.8 pair is expected while vtracer is pre-1.0).
+multiple-versions = "warn"
+skip = []
+
+[sources]
+# Registry only — no git dependencies in the final graph.
+# (The dev sandbox's offline vendor replacement is a local cargo source
+# rewrite outside the repo; CI resolves from plain crates.io.)
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+unknown-registry = "deny"
+unknown-git = "deny"
