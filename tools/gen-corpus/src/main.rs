@@ -201,7 +201,15 @@ impl Sheet {
     ///
     /// F1 fix: painted pixels are tracked with an explicit cell mask, so ink
     /// colour 0 (black) is a perfectly valid paint value.
-    fn stamp(&mut self, shape: &str, tx: i32, ty: i32, s: u32, t: u32, color: Luma) -> Option<BBox> {
+    fn stamp(
+        &mut self,
+        shape: &str,
+        tx: i32,
+        ty: i32,
+        s: u32,
+        t: u32,
+        color: Luma,
+    ) -> Option<BBox> {
         let mut cell = vec![0u8; (s * s) as usize];
         let bb = rasterize_shape(shape, s, t, &mut cell)?;
         let sx = tx + bb.x;
@@ -403,7 +411,11 @@ fn build_duplicates(rng: &mut Rng, sheet: &mut Sheet, truth: &mut Vec<IconTruth>
             let s = 48 + rng.range_i(-2, 2);
             let shape = set[((row * n + col) as usize) % set.len()];
             let t = stroke_for(rng, shape, s as u32);
-            let color = if rng.next_u64().is_multiple_of(4) { 20 } else { 0 };
+            let color = if rng.next_u64().is_multiple_of(4) {
+                20
+            } else {
+                0
+            };
             let tx = margin + col * cell + (cell - s) / 2;
             let ty = margin + row * cell + (cell - s) / 2;
             if let Some(bbox) = sheet.stamp(shape, tx, ty, s as u32, t, color) {
@@ -473,11 +485,11 @@ fn build_noisy(rng: &mut Rng, sheet: &mut Sheet, truth: &mut Vec<IconTruth>) {
 /// foreground cutoff (bg 255 − threshold 32 = 223).
 const COLOUR_PALETTE: [(u8, u8, u8, u8); 5] = [
     // (luma, r, g, b)
-    (76, 255, 0, 0),   // red
-    (150, 0, 255, 0),  // green
-    (29, 0, 0, 255),   // blue
+    (76, 255, 0, 0),    // red
+    (150, 0, 255, 0),   // green
+    (29, 0, 0, 255),    // blue
     (151, 255, 128, 0), // orange
-    (67, 128, 0, 255), // purple
+    (67, 128, 0, 255),  // purple
 ];
 
 fn build_colour(rng: &mut Rng, sheet: &mut Sheet, truth: &mut Vec<IconTruth>) {
@@ -633,7 +645,19 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_grid(rng, sh, tr, GridCfg { n: 4, sizes: (44, 52), drift: 0, colors: (0, 20) })),
+                        Box::new(|rng, sh, tr| {
+                build_grid(
+                    rng,
+                    sh,
+                    tr,
+                    GridCfg {
+                        n: 4,
+                        sizes: (44, 52),
+                        drift: 0,
+                        colors: (0, 20),
+                    },
+                )
+            }),
         ),
         sheet(
             "02_mixed_grid",
@@ -642,7 +666,19 @@ pub fn generate_all(out_dir: &Path) -> usize {
             244,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_grid(rng, sh, tr, GridCfg { n: 6, sizes: (32, 62), drift: 0, colors: (0, 40) })),
+                        Box::new(|rng, sh, tr| {
+                build_grid(
+                    rng,
+                    sh,
+                    tr,
+                    GridCfg {
+                        n: 6,
+                        sizes: (32, 62),
+                        drift: 0,
+                        colors: (0, 40),
+                    },
+                )
+            }),
         ),
         sheet(
             "03_rings_holes",
@@ -658,7 +694,11 @@ pub fn generate_all(out_dir: &Path) -> usize {
                 for row in 0..5i32 {
                     for col in 0..5i32 {
                         let s = rng.range(56, 64) as i32;
-                        let shape = if rng.next_u64().is_multiple_of(2) { "ring" } else { "frame" };
+                        let shape = if rng.next_u64().is_multiple_of(2) {
+                            "ring"
+                        } else {
+                            "frame"
+                        };
                         let t = rng.range(10, 14);
                         let tx = margin + col * cell + (cell - s) / 2;
                         let ty = margin + row * cell + (cell - s) / 2;
@@ -689,7 +729,19 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_grid(rng, sh, tr, GridCfg { n: 8, sizes: (56, 64), drift: 0, colors: (0, 24) })),
+                        Box::new(|rng, sh, tr| {
+                build_grid(
+                    rng,
+                    sh,
+                    tr,
+                    GridCfg {
+                        n: 8,
+                        sizes: (56, 64),
+                        drift: 0,
+                        colors: (0, 24),
+                    },
+                )
+            }),
         ),
         sheet(
             "06_thick_strokes",
@@ -757,7 +809,19 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_grid(rng, sh, tr, GridCfg { n: 5, sizes: (48, 60), drift: 10, colors: (0, 30) })),
+                        Box::new(|rng, sh, tr| {
+                build_grid(
+                    rng,
+                    sh,
+                    tr,
+                    GridCfg {
+                        n: 5,
+                        sizes: (48, 60),
+                        drift: 10,
+                        colors: (0, 30),
+                    },
+                )
+            }),
         ),
         sheet(
             "09_near_touching",
@@ -809,7 +873,19 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_grid(rng, sh, tr, GridCfg { n: 32, sizes: (40, 56), drift: 0, colors: (0, 24) })),
+                        Box::new(|rng, sh, tr| {
+                build_grid(
+                    rng,
+                    sh,
+                    tr,
+                    GridCfg {
+                        n: 32,
+                        sizes: (40, 56),
+                        drift: 0,
+                        colors: (0, 24),
+                    },
+                )
+            }),
         ),
         sheet(
             "12_c2_latency_grid",
@@ -818,7 +894,19 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             true,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_grid(rng, sh, tr, GridCfg { n: 10, sizes: (120, 150), drift: 0, colors: (0, 24) })),
+                        Box::new(|rng, sh, tr| {
+                build_grid(
+                    rng,
+                    sh,
+                    tr,
+                    GridCfg {
+                        n: 10,
+                        sizes: (120, 150),
+                        drift: 0,
+                        colors: (0, 24),
+                    },
+                )
+            }),
         ),
         sheet(
             "13_c7_jpeg_grid",
@@ -827,7 +915,19 @@ pub fn generate_all(out_dir: &Path) -> usize {
             247,
             false,
             Output::Jpeg,
-            Box::new(|rng, sh, tr| build_grid(rng, sh, tr, GridCfg { n: 5, sizes: (48, 60), drift: 0, colors: (0, 30) })),
+                        Box::new(|rng, sh, tr| {
+                build_grid(
+                    rng,
+                    sh,
+                    tr,
+                    GridCfg {
+                        n: 5,
+                        sizes: (48, 60),
+                        drift: 0,
+                        colors: (0, 30),
+                    },
+                )
+            }),
         ),
         sheet(
             "14_c8_colour_icons",

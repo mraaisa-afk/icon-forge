@@ -93,6 +93,9 @@ fn svg_output_is_well_formed() {
         assert!(svg.starts_with("<?xml"), "missing xml decl");
         assert!(svg.contains("<svg"), "missing <svg root");
         assert!(svg.trim_end().ends_with("</svg>"), "missing </svg> close");
-        assert!(svg.contains("<path") || svg.contains("<g"), "no geometry in output");
+        assert!(
+            svg.contains("<path") || svg.contains("<g"),
+            "no geometry in output"
+        );
     }
 }

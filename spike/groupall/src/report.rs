@@ -85,7 +85,8 @@ pub fn run_corpus(corpus_dir: &Path) -> CorpusReport {
         #[serde(default)]
         keystone: bool,
     }
-    let manifest: Manifest = serde_json::from_str(&manifest_raw).expect("manifest.json is valid JSON");
+    let manifest: Manifest =
+        serde_json::from_str(&manifest_raw).expect("manifest.json is valid JSON");
 
     let pipeline = GroupAllPipeline::default();
     let mut sheets = Vec::new();
@@ -97,7 +98,8 @@ pub fn run_corpus(corpus_dir: &Path) -> CorpusReport {
     for spec in &manifest.sheets {
         let path = corpus_dir.join(&spec.file);
         let t0 = Instant::now();
-        let raster = PngRaster::load(&path).unwrap_or_else(|e| panic!("decode {}: {e}", path.display()));
+        let raster =
+            PngRaster::load(&path).unwrap_or_else(|e| panic!("decode {}: {e}", path.display()));
         let out = pipeline.group_all(&raster);
         let elapsed = t0.elapsed().as_millis();
         if spec.keystone {

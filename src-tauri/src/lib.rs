@@ -10,6 +10,8 @@ pub mod commands;
 pub mod jobs;
 pub mod state;
 
+use tauri::Manager;
+
 /// Builds the Tauri application (exposed for dev harnesses).
 pub fn tauri_app() -> tauri::Builder<tauri::Wry> {
     commands::register(

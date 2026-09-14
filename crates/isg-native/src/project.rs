@@ -49,7 +49,7 @@ fn remove_stale_tmp(target: &Path) {
     let stem = stem.to_string_lossy();
     if let Ok(entries) = fs::read_dir(&dir) {
         for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy();
+            let name = e.file_name().to_string_lossy().into_owned();
             if name.starts_with(&*stem) && name.contains(TMP_MARKER) {
                 let _ = fs::remove_file(e.path());
             }

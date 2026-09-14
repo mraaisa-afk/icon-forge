@@ -315,11 +315,19 @@ impl JobEngine {
             tier,
             job,
         });
-        if let Some(run) = &g.running {
-            if run.tier > tier && g.pending_preempt != Some(run.id) {
-                g.pending_preempt = Some(run.id);
+        // Collect the preemption decision under shared borrows first: `g`
+        // is a guard deref, so field writes conflict with any live borrow
+        // of another field.
+        let preempt = match &g.running {
+            Some(run) if run.tier > tier && g.pending_preempt != Some(run.id) => {
+                let id = run.id;
                 run.token.cancel();
+                Some(id)
             }
+            _ => None,
+        };
+        if let Some(preempted) = preempt {
+            g.pending_preempt = Some(preempted);
         }
         self.shared.cv.notify_all();
         JobId(id)
@@ -404,14 +412,19 @@ fn worker_loop(shared: Arc<Shared>) {
             let mut g = shared.inner.lock().unwrap();
             loop {
                 // Preemption: strictly higher tier queued while a lower tier
-                // runs → cancel the running job's token.
-                if let Some(run) = &g.running {
-                    if let Some(tier) = g.highest_queued_tier() {
-                        if tier < run.tier && g.pending_preempt != Some(run.id) {
-                            g.pending_preempt = Some(run.id);
-                            run.token.cancel();
-                        }
+                // runs → cancel the running job's token. As in `submit`, the
+                // decision is collected under shared borrows, the write
+                // happens after.
+                let preempt = match (&g.running, g.highest_queued_tier()) {
+                    (Some(run), Some(tier)) if tier < run.tier && g.pending_preempt != Some(run.id) => {
+                        let id = run.id;
+                        run.token.cancel();
+                        Some(id)
                     }
+                    _ => None,
+                };
+                if let Some(preempted) = preempt {
+                    g.pending_preempt = Some(preempted);
                 }
                 if g.running.is_none() {
                     if let Some(q) = g.pop_highest() {

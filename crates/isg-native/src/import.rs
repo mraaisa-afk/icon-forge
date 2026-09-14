@@ -148,7 +148,7 @@ pub fn import_folder(
         batch.push(NewSheet {
             id,
             source_path: entry.path().to_string_lossy().into_owned(),
-            content_hash: digest.to_hex().into_owned(),
+            content_hash: digest.to_hex().to_string(),
             width,
             height,
         });
@@ -174,7 +174,11 @@ pub fn import_folder(
     Ok(stats)
 }
 
-fn flush(lib: &mut Library, batch: &mut Vec<NewSheet>, stats: &mut ImportStats) -> crate::Result<()> {
+fn flush(
+    lib: &mut Library,
+    batch: &mut Vec<NewSheet>,
+    stats: &mut ImportStats,
+) -> crate::Result<()> {
     let tx = lib.conn_mut().transaction()?;
     for sheet in batch.iter() {
         let outcome = insert_in_tx(&tx, sheet)?;

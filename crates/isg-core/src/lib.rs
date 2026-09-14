@@ -88,7 +88,10 @@ impl Bbox {
     /// Creates a box unconditionally (panics on empty extents in debug builds).
     #[must_use]
     pub fn from_parts(x: u32, y: u32, w: u32, h: u32) -> Self {
-        debug_assert!(w > 0 && h > 0, "Bbox::from_parts requires non-empty extents");
+        debug_assert!(
+            w > 0 && h > 0,
+            "Bbox::from_parts requires non-empty extents"
+        );
         Self { x, y, w, h }
     }
 
