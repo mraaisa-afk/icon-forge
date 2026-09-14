@@ -8,6 +8,7 @@
 //! This test is what makes `cargo test` enforce the phase gate locally and in
 //! CI (windows-latest leg).
 
+use isg_core::SheetPipeline;
 use std::path::Path;
 
 fn corpus_dir() -> std::path::PathBuf {
