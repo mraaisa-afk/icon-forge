@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use isg_core::{Bbox, ForegroundMasker, GroupingStrategy, IconGroup, RasterView};
+use isg_core::{Bbox, GroupingStrategy, IconGroup, RasterView};
 
 /// Two-pass union-find grouper with a speckle (minimum area) filter.
 #[derive(Clone, Copy, Debug)]

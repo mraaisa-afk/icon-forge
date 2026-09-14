@@ -658,7 +658,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
                 for row in 0..5i32 {
                     for col in 0..5i32 {
                         let s = rng.range(56, 64) as i32;
-                        let shape = if rng.next_u64() % 2 == 0 { "ring" } else { "frame" };
+                        let shape = if rng.next_u64().is_multiple_of(2) { "ring" } else { "frame" };
                         let t = rng.range(10, 14);
                         let tx = margin + col * cell + (cell - s) / 2;
                         let ty = margin + row * cell + (cell - s) / 2;
@@ -914,12 +914,6 @@ fn main() {
             out = Path::new(&args[i + 1]);
             i += 2;
         } else {
-            i += 1;
-        }
-    }
-    generate_all(out);
-}
- } else {
             i += 1;
         }
     }

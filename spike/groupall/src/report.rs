@@ -80,10 +80,6 @@ pub fn run_corpus(corpus_dir: &Path) -> CorpusReport {
     #[derive(serde::Deserialize)]
     struct SheetSpec {
         file: String,
-        #[serde(default)]
-        width: u32,
-        #[serde(default)]
-        height: u32,
         expected_groups: usize,
         /// C2-class latency sheet: its wall time is the keystone criterion.
         #[serde(default)]
