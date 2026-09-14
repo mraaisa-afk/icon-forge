@@ -2,9 +2,12 @@
 #
 # * windows-latest: primary leg — build, tests (incl. the Phase 0 exit
 #   criteria gate over bench/corpus), the spike benchmark, corpus
-#   regeneration consistency, the wasm32 keystone check, license policy.
+#   regeneration consistency, the wasm32 keystone check.
 # * ubuntu-latest: trivial fast leg — wasm32 keystone check + debug build,
-#   for quick signal (kept minimal by design; no macOS/Linux packaging).
+#   plus the license policy gate (cargo-deny-action is a container action,
+#   which GitHub only supports on Linux; license analysis reads Cargo.lock
+#   metadata and is platform-independent, so enforcing it here is
+#   equivalent). Kept minimal by design; no macOS/Linux packaging.
 name: CI
 
 on:
@@ -17,7 +20,7 @@ env:
 
 jobs:
   windows-primary:
-    name: "Windows (primary): build + tests + benchmark + corpus consistency + wasm gate + license"
+    name: "Windows (primary): build + tests + benchmark + corpus consistency + wasm gate"
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -73,13 +76,8 @@ jobs:
       - name: Clippy (workspace, release)
         run: cargo clippy --workspace --release -- -D warnings
 
-      - name: "License policy (cargo-deny: GPL/AGPL hard ban)"
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-
   ubuntu-quick:
-    name: "Ubuntu (quick): wasm gate + debug build"
+    name: "Ubuntu (quick): wasm gate + debug build + license policy"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -107,3 +105,12 @@ jobs:
 
       - name: Debug build (workspace)
         run: cargo build --workspace
+
+      # Lives on this leg because cargo-deny-action is a container action
+      # (Linux-only on GitHub runners). Policy identical on every platform:
+      # copyleft = deny, explicit GPL/AGPL hard ban (deny.toml).
+      - name: "License policy (cargo-deny: GPL/AGPL hard ban)"
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
