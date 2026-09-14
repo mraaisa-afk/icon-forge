@@ -176,16 +176,18 @@ mod tests {
                 mask[y * 32 + x] = true;
             }
         }
-        // diagonal touch: two 4x4 blocks joined by the single bridge pixel
-        // (14,14) — 8-connectivity must merge them into one group.
-        for y in 10..14 {
-            for x in 10..14 {
+        // diagonal touch: two 3x3 blocks joined ONLY by the single bridge
+        // pixel (19,9) — 8-connectivity must merge them into one group.
+        // (Blocks are placed far enough apart that no other pair of corners
+        // is 8-adjacent, so the bridge is the only connection.)
+        for y in 6..9 {
+            for x in 16..19 {
                 mask[y * 32 + x] = true;
             }
         }
-        mask[14 * 32 + 14] = true;
-        for y in 15..19 {
-            for x in 15..19 {
+        mask[9 * 32 + 19] = true;
+        for y in 10..13 {
+            for x in 20..23 {
                 mask[y * 32 + x] = true;
             }
         }
@@ -208,8 +210,8 @@ mod tests {
         assert_eq!(groups[0].bbox, Bbox::new(4, 4, 6, 6).unwrap());
         assert_eq!(
             groups[1].bbox,
-            Bbox::new(10, 10, 9, 9).unwrap(),
-            "diagonally touched blocks form one 9x9 group"
+            Bbox::new(16, 6, 7, 7).unwrap(),
+            "diagonally touched blocks form one 7x7 group"
         );
         assert_eq!(groups[2].bbox, Bbox::new(20, 20, 8, 3).unwrap());
     }
