@@ -52,6 +52,14 @@ version = 2
 # Unmaintained (not vulnerable) crates pulled in transitively by the frozen
 # Tauri 2.x stack. None is reachable as an attack surface for our use; each
 # is re-evaluated when we bump Tauri. Sourced advisories stay denied.
+# Anything unidentifiable with high confidence fails the build.
+confidence-threshold = 0.9
+
+[advisories]
+version = 2
+# Unmaintained (not vulnerable) crates pulled in transitively by the frozen
+# Tauri 2.x stack. None is reachable as an attack surface for our use; each
+# is re-evaluated when we bump Tauri. Vulnerability advisories stay denied.
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: build-time only, via gtk/glib macro stack (Tauri Linux dep)" },
     { id = "RUSTSEC-2025-0081", reason = "unic-char-property: via urlpattern (tauri-utils)" },
@@ -60,8 +68,6 @@ ignore = [
     { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident: via urlpattern (tauri-utils)" },
     { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version: via urlpattern (tauri-utils)" },
 ]
-# Anything unidentifiable with high confidence fails the build.
-confidence-threshold = 0.9
 
 [bans]
 # Duplicate major versions are a review-time smell, not a hard fail (the
