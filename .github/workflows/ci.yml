@@ -60,7 +60,7 @@ jobs:
       - name: Spike benchmark — Phase 0 exit gate (exact counts, C2 keystone <= 2.0 s; JSON report in logs)
         run: cargo run -p isg-spike-groupall --release -- --corpus bench/corpus --json
 
-      - name: Keystone: isg-core compiles for wasm32-unknown-unknown
+      - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
         run: cargo check --target wasm32-unknown-unknown -p isg-core
 
       - name: Format check
@@ -69,7 +69,7 @@ jobs:
       - name: Clippy (workspace, release)
         run: cargo clippy --workspace --release -- -D warnings
 
-      - name: License policy (cargo-deny: GPL/AGPL hard ban)
+      - name: "License policy (cargo-deny: GPL/AGPL hard ban)"
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -98,7 +98,7 @@ jobs:
           restore-keys: |
             cargo-linux-
 
-      - name: Keystone: isg-core compiles for wasm32-unknown-unknown
+      - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
         run: cargo check --target wasm32-unknown-unknown -p isg-core
 
       - name: Debug build (workspace)
