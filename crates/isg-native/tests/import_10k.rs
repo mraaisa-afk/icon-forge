@@ -4,8 +4,8 @@
 //! a real WAL database on disk, then re-imports to prove deduplication.
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use isg_native::cancel::CancellationToken;
