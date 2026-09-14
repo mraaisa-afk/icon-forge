@@ -87,7 +87,9 @@ fn svg_output_is_well_formed() {
     let out = pipeline.group_all(&raster);
     assert!(!out.groups.is_empty(), "no groups found on {first}");
     for (g, svg) in out.groups.iter().zip(out.svgs.iter()) {
-        let svg = svg.unwrap_or_else(|e| panic!("trace failed for group {:?}: {e}", g.bbox));
+        let svg = svg
+            .as_ref()
+            .unwrap_or_else(|e| panic!("trace failed for group {:?}: {e}", g.bbox));
         assert!(svg.starts_with("<?xml"), "missing xml decl");
         assert!(svg.contains("<svg"), "missing <svg root");
         assert!(svg.trim_end().ends_with("</svg>"), "missing </svg> close");
