@@ -28,12 +28,6 @@ impl From<isg_native::IsgError> for CmdError {
     }
 }
 
-fn poisoned() -> CmdError {
-    CmdError {
-        message: "library mutex poisoned".into(),
-    }
-}
-
 type CmdResult<T> = Result<T, CmdError>;
 
 /// Library summary returned by open/create/save.

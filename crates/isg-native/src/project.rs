@@ -150,7 +150,7 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{NewSheet, ReviewState};
+    use crate::db::{NewIcon, NewSheet, ReviewState};
 
     fn seed(lib: &mut Library, n: u32) {
         for i in 0..n {
