@@ -94,6 +94,15 @@ impl fmt::Display for JobError {
 
 impl std::error::Error for JobError {}
 
+impl From<crate::IsgError> for JobError {
+    fn from(e: crate::IsgError) -> Self {
+        if matches!(e, crate::IsgError::Cancelled(_)) {
+            return JobError::Cancelled;
+        }
+        JobError::Failed(e.to_string())
+    }
+}
+
 impl From<crate::cancel::Cancelled> for JobError {
     fn from(_: crate::cancel::Cancelled) -> Self {
         JobError::Cancelled

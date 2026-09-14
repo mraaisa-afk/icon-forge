@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{Builder, State};
 
+use isg_native::db::Library;
 use isg_native::jobs::{JobEngine, JobId};
 
 use crate::jobs::ImportJob;

@@ -231,10 +231,6 @@ impl Library {
     }
 
     /// Re-applies connection pragmas (used after a save reopen).
-    pub(crate) fn reapply_pragmas(&mut self) -> crate::Result<()> {
-        apply_pragmas(&self.conn)
-    }
-
     /// Runs `PRAGMA quick_check` and validates the schema version.
     pub fn verify_integrity(&self) -> crate::Result<()> {
         let status: String = self
