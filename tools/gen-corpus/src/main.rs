@@ -381,7 +381,7 @@ fn build_edge_corner(rng: &mut Rng, sheet: &mut Sheet, truth: &mut Vec<IconTruth
         let t = rng.range(4, 8);
         let color = rng.range(0, 30) as u8;
         let bbox = sheet
-            .stamp(shape, *tx, *ty, s as u32, t as u32, color)
+            .stamp(shape, *tx, *ty, s as u32, t, color)
             .unwrap_or_else(|| panic!("edge_corner stamp failed at {tx},{ty}"));
         truth.push(IconTruth {
             id: truth.len() as u32,
@@ -403,7 +403,7 @@ fn build_duplicates(rng: &mut Rng, sheet: &mut Sheet, truth: &mut Vec<IconTruth>
             let s = 48 + rng.range_i(-2, 2);
             let shape = set[((row * n + col) as usize) % set.len()];
             let t = stroke_for(rng, shape, s as u32);
-            let color = if rng.next_u64() % 4 == 0 { 20 } else { 0 };
+            let color = if rng.next_u64().is_multiple_of(4) { 20 } else { 0 };
             let tx = margin + col * cell + (cell - s) / 2;
             let ty = margin + row * cell + (cell - s) / 2;
             if let Some(bbox) = sheet.stamp(shape, tx, ty, s as u32, t, color) {
@@ -735,7 +735,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
                 for i in 0..9usize {
                     let row = (i / 3) as i32;
                     let col = (i % 3) as i32;
-                    let s = sizes[i] as i32;
+                    let s = sizes[i];
                     let shape = SHAPES[i % SHAPES.len()];
                     let t = stroke_for(rng, shape, s as u32);
                     let tx = margin + col * cell + (cell - s) / 2;
@@ -799,7 +799,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_edge_corner(rng, sh, tr)),
+            Box::new(build_edge_corner),
         ),
         // ---- extended corpus (C1/C2/C7–C10) ----
         sheet(
@@ -836,7 +836,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::RgbPng,
-            Box::new(|rng, sh, tr| build_colour(rng, sh, tr)),
+            Box::new(build_colour),
         ),
         sheet(
             "15_c9_duplicates",
@@ -845,7 +845,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_duplicates(rng, sh, tr)),
+            Box::new(build_duplicates),
         ),
         sheet(
             "16_c10_noisy_scan",
@@ -854,7 +854,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-            Box::new(|rng, sh, tr| build_noisy(rng, sh, tr)),
+            Box::new(build_noisy),
         ),
     ];
 

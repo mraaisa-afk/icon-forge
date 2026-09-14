@@ -65,7 +65,7 @@ impl CorpusReport {
     /// ≥ 95 % of sheets exactly right, rounded up: with N sheets, at least
     /// ceil(0.95·N) must be exact.
     pub fn min_correct_sheets(n: usize) -> usize {
-        (95usize.saturating_mul(n) + 99) / 100
+        95usize.saturating_mul(n).div_ceil(100)
     }
 }
 
