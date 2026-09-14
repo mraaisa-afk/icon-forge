@@ -336,7 +336,7 @@ fn progress_events_flow_through_sink() {
         tier: Tier::Batch,
         steps: 5,
     }));
-    let mut progress_seen = 0u32;
+    let mut progress_seen = 0u64;
     loop {
         match tap.next(Duration::from_secs(10)) {
             JobEvent::Progress { id: p, done, .. } if p == id => {
