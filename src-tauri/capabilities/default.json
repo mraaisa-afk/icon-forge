@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Main-window capability: core defaults (events, window state)",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

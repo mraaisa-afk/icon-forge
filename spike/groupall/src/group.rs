@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use isg_core::{Bbox, GroupingStrategy, IconGroup, RasterView};
+use isg_core::{Bbox, ForegroundMask, GroupingStrategy, IconGroup, RasterView};
 
 /// Two-pass union-find grouper with a speckle (minimum area) filter.
 #[derive(Clone, Copy, Debug)]
@@ -59,11 +59,11 @@ struct CclStats {
 
 impl GroupingStrategy for CclGrouper {
     #[allow(clippy::needless_range_loop)] // pixel-grid indexing is the domain
-    fn group_all(&self, raster: &dyn RasterView, mask: &[bool]) -> Vec<IconGroup> {
+    fn group_all(&self, raster: &dyn RasterView, mask: &ForegroundMask) -> Vec<IconGroup> {
         let w = raster.width() as i32;
         let h = raster.height() as i32;
         let n = (w * h) as usize;
-        debug_assert_eq!(mask.len(), n);
+        debug_assert_eq!(mask.pixel_count() as usize, n);
 
         // ---- pass 1: label with union-find (upper-left 8-neighbourhood) ----
         let mut parent: Vec<i32> = vec![-1; n];
@@ -71,7 +71,7 @@ impl GroupingStrategy for CclGrouper {
         for y in 0..h {
             for x in 0..w {
                 let i = (y * w + x) as usize;
-                if !mask[i] {
+                if !mask.get_index(i) {
                     continue;
                 }
                 parent[i] = i as i32; // new set
@@ -86,7 +86,7 @@ impl GroupingStrategy for CclGrouper {
                         continue;
                     }
                     let ni = (ny * w + nx) as usize;
-                    if mask[ni] && parent[ni] != -1 {
+                    if mask.get_index(ni) && parent[ni] != -1 {
                         uf_union(&mut parent, i, ni);
                     }
                 }
@@ -100,7 +100,7 @@ impl GroupingStrategy for CclGrouper {
             let row = (y * w) as usize;
             for x in 0..w {
                 let i = row + x as usize;
-                if !mask[i] {
+                if !mask.get_index(i) {
                     continue;
                 }
                 let root = uf_find(&mut parent, i);
@@ -157,23 +157,23 @@ mod tests {
 
     #[test]
     fn groups_disconnected_blocks_and_filters_noise() {
-        let mut mask = vec![false; 32 * 32];
+        let mut mask = ForegroundMask::new(32, 32);
         // 6x6 block at (4,4)
         for y in 4..10 {
             for x in 4..10 {
-                mask[y * 32 + x] = true;
+                mask.set_index(y * 32 + x, true);
             }
         }
         // 8x3 block at (20,20)
         for y in 20..23 {
             for x in 20..28 {
-                mask[y * 32 + x] = true;
+                mask.set_index(y * 32 + x, true);
             }
         }
         // 2x2 noise at (0, 28) — below min_area
         for y in 28..30 {
             for x in 0..2 {
-                mask[y * 32 + x] = true;
+                mask.set_index(y * 32 + x, true);
             }
         }
         // diagonal touch: two 3x3 blocks joined ONLY by the single bridge
@@ -182,13 +182,13 @@ mod tests {
         // is 8-adjacent, so the bridge is the only connection.)
         for y in 6..9 {
             for x in 16..19 {
-                mask[y * 32 + x] = true;
+                mask.set_index(y * 32 + x, true);
             }
         }
-        mask[9 * 32 + 19] = true;
+        mask.set_index(9 * 32 + 19, true);
         for y in 10..13 {
             for x in 20..23 {
-                mask[y * 32 + x] = true;
+                mask.set_index(y * 32 + x, true);
             }
         }
 
@@ -222,13 +222,13 @@ mod tests {
         // right edge must not union with one flush against the left edge of
         // the same rows.
         let w = 24usize;
-        let mut mask = vec![false; 24 * 24];
+        let mut mask = ForegroundMask::new(24, 24);
         for y in 10..14 {
             for x in 20..24 {
-                mask[y * w + x] = true; // flush right
+                mask.set_index(y * w + x, true); // flush right
             }
             for x in 0..4 {
-                mask[y * w + x] = true; // flush left
+                mask.set_index(y * w + x, true); // flush left
             }
         }
         struct R;

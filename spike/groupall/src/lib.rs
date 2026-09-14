@@ -1,6 +1,6 @@
 //! Phase 0 spike: raster sheet → foreground mask → CCL icon groups → per-group
 //! SVG (vtracer). Throwaway code — the *traits* it exercises live in
-//! [`isg_core`] and are provisional (see the crate docs there).
+//! [`isg_core`] and are frozen as of Phase 1 (see the crate docs there).
 //!
 //! Pipeline (mirrors the Phase 2 stage names):
 //!

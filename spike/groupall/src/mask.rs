@@ -7,7 +7,7 @@
 //! Phase 2 replaces this with CIE-Lab ΔE background detection — the
 //! [`ForegroundMasker`] trait is the stable seam.
 
-use isg_core::{ForegroundMasker, RasterView};
+use isg_core::{ForegroundMask, ForegroundMasker, RasterView};
 
 /// Border-median foreground masker.
 #[derive(Clone, Copy, Debug)]
@@ -46,14 +46,16 @@ pub fn border_median(raster: &dyn RasterView) -> f32 {
 }
 
 impl ForegroundMasker for BorderMedianMasker {
-    fn foreground(&self, raster: &dyn RasterView) -> Vec<bool> {
-        let w = raster.width() as usize;
-        let h = raster.height() as usize;
+    fn foreground(&self, raster: &dyn RasterView) -> ForegroundMask {
+        let w = raster.width();
+        let h = raster.height();
         let bg = border_median(raster);
-        let mut out = Vec::with_capacity(w * h);
-        for y in 0..h as u32 {
-            for &v in raster.luma_row(y) {
-                out.push((v - bg).abs() >= self.threshold);
+        let mut out = ForegroundMask::new(w, h);
+        for y in 0..h {
+            for (x, &v) in raster.luma_row(y).iter().enumerate() {
+                if (v - bg).abs() >= self.threshold {
+                    out.set(x as u32, y, true);
+                }
             }
         }
         out
@@ -93,11 +95,10 @@ mod tests {
         }
         let r = M { w: 16, h: 16, luma };
         let m = BorderMedianMasker::default().foreground(&r);
-        let count = m.iter().filter(|&&b| b).count();
-        assert_eq!(count, 16, "icon pixels only");
-        assert!(m[6 * 16 + 6]);
-        assert!(!m[0]);
-        assert!(!m[6 * 16 + 5]);
+        assert_eq!(m.ink_count(), 16, "icon pixels only");
+        assert!(m.get(6, 6));
+        assert!(!m.get(0, 0));
+        assert!(!m.get(5, 6));
     }
 
     #[test]
@@ -111,7 +112,6 @@ mod tests {
         }
         let r = M { w: 16, h: 16, luma };
         let m = BorderMedianMasker::default().foreground(&r);
-        let count = m.iter().filter(|&&b| b).count();
-        assert_eq!(count, 16, "icon pixels only (light-on-dark)");
+        assert_eq!(m.ink_count(), 16, "icon pixels only (light-on-dark)");
     }
 }

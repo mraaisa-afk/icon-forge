@@ -20,28 +20,32 @@
 //! cargo check --target wasm32-unknown-unknown -p isg-core
 //! ```
 //!
-//! ## Provisional surface (spike-scoped — NOT frozen)
+//! ## Frozen surface (Phase 1)
 //!
-//! The items re-exported by [`prelude`] are **provisional**: they exist so the
-//! Phase 0 spike and the CI keystone check have a stable seam to compile
-//! against. They are deliberately *not* frozen:
+//! The items re-exported by [`prelude`] are **frozen as of Phase 1**:
+//! [`Bbox`], [`IconGroup`], [`TracePreset`], [`TraceError`], [`RasterView`],
+//! [`ForegroundMask`] + [`RleRun`], [`ForegroundMasker`],
+//! [`GroupingStrategy`], [`VectorTracer`], [`GroupAllOutput`] and
+//! [`SheetPipeline`]. The Phase 0 spike ran on a provisional `Vec<bool>`
+//! mask; per the Phase 0 review decision (F10) the mask representation was
+//! first reworked to the architecture-mandated bit-packed 1-bpp storage with
+//! RLE row extraction (see [`mask`]) — and only then frozen.
 //!
-//! * [`ForegroundMasker::foreground`] returns a `Vec<bool>` (1 byte per pixel)
-//!   and [`GroupingStrategy`] consumes it — the architecture mandates
-//!   bit-packed 1-bpp masks and run-length-encoded rows (ARCHITECTURE.md
-//!   §3.4). Freezing the `Vec<bool>` shape now would guarantee a breaking
-//!   change in Phase 2/3, so the freeze is deferred until the mask/run types
-//!   are reworked to the mandated representation.
-//! * The `Leveler` and `ReviewScorer` traits (ARCHITECTURE.md §7) land and
-//!   freeze in their own phases (5 and 6).
+//! Freezing means: breaking changes to these items require an explicit,
+//! documented decision (the equivalent of a golden-file update) — downstream
+//! crates (`isg-native`, `src-tauri`, `isg-wasm`) and the WASM keystone check
+//! compile against them on every commit.
 //!
-//! Breaking changes before the rework are expected and permitted. The freeze
-//! happens when the RLE / bit-packed rework lands (Phase 2/3 boundary).
+//! The `Leveler` and `ReviewScorer` traits (ARCHITECTURE.md §7) land and
+//! freeze in their own phases (5 and 6).
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod mask;
 pub mod prelude;
+
+pub use crate::mask::{ForegroundMask, RleRun};
 
 /// A tight axis-aligned bounding box in raster (pixel) coordinates.
 ///
@@ -288,16 +292,13 @@ pub trait RasterView: Send + Sync {
 
 /// Stage 1 of the pipeline: raster → foreground mask.
 ///
-/// Returns a `Vec<bool>` of length `width * height` indexed `y * width + x`
-/// (top-left origin). Phase 0 uses border-median thresholding; Phase 2
-/// replaces this with CIE-Lab ΔE background detection — the trait is the
-/// stable seam.
+/// Phase 0 used border-median thresholding; Phase 2 replaces this with
+/// CIE-Lab ΔE background detection — the trait is the stable seam.
 ///
-/// **Provisional signature:** the `Vec<bool>` mask is spike-scoped; the
-/// production trait will expose a bit-packed / RLE mask (see crate docs).
+/// Returns a bit-packed [`ForegroundMask`] (see [`crate::mask`]).
 pub trait ForegroundMasker: Send + Sync {
     /// Computes the foreground mask for `raster`.
-    fn foreground(&self, raster: &dyn RasterView) -> Vec<bool>;
+    fn foreground(&self, raster: &dyn RasterView) -> ForegroundMask;
 }
 
 /// Stage 2 of the pipeline: foreground mask → icon groups.
@@ -306,7 +307,10 @@ pub trait ForegroundMasker: Send + Sync {
 /// in equal order (sorted by `bbox.y`, `bbox.x`, then `origin`).
 pub trait GroupingStrategy: Send + Sync {
     /// Groups every foreground pixel of `mask` into icon groups.
-    fn group_all(&self, raster: &dyn RasterView, mask: &[bool]) -> Vec<IconGroup>;
+    ///
+    /// The mask is the shared bit-packed representation; production
+    /// implementations (Phase 3) consume [`ForegroundMask::runs`] directly.
+    fn group_all(&self, raster: &dyn RasterView, mask: &ForegroundMask) -> Vec<IconGroup>;
 }
 
 /// Stage 3 of the pipeline: one group's crop → standalone SVG.
@@ -453,12 +457,12 @@ mod tests {
 
     struct OnePixelGrouper;
     impl GroupingStrategy for OnePixelGrouper {
-        fn group_all(&self, raster: &dyn RasterView, mask: &[bool]) -> Vec<IconGroup> {
-            let w = raster.width();
-            for (i, &m) in mask.iter().enumerate() {
-                if m {
-                    let x = (i % w as usize) as u32;
-                    let y = (i / w as usize) as u32;
+        fn group_all(&self, raster: &dyn RasterView, mask: &ForegroundMask) -> Vec<IconGroup> {
+            let w = raster.width() as usize;
+            for i in 0..mask.pixel_count() as usize {
+                if mask.get_index(i) {
+                    let x = (i % w) as u32;
+                    let y = (i / w) as u32;
                     return vec![IconGroup {
                         bbox: Bbox::from_parts(x, y, 1, 1),
                         area: 1,
@@ -475,8 +479,8 @@ mod tests {
         let mut luma = vec![255.0f32; 8 * 8];
         luma[1 * 8 + 1] = 0.0;
         let raster = MemRaster { w: 8, h: 8, luma };
-        let mut mask = vec![false; 64];
-        mask[9] = true;
+        let mut mask = ForegroundMask::new(8, 8);
+        mask.set_index(9, true);
         let groups = OnePixelGrouper.group_all(&raster, &mask);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].bbox, Bbox::new(1, 1, 1, 1).unwrap());

@@ -1,9 +1,8 @@
-//! Provisional prelude: the Phase 0 public surface of `isg-core`.
+//! The frozen public surface of `isg-core` (Phase 1).
 //!
-//! These re-exports are **spike-scoped and not frozen** — see the crate docs.
-//! The freeze happens when the mask/run types are reworked to the
-//! architecture's bit-packed / RLE representation.
+//! Import this prelude to use the pipeline seams. Items here are frozen —
+//! see the crate docs. `Leveler` and `ReviewScorer` join in phases 5/6.
 pub use crate::{
-    Bbox, ForegroundMasker, GroupAllOutput, GroupingStrategy, IconGroup, RasterView, SheetPipeline,
-    TraceError, TracePreset, VectorTracer,
+    Bbox, ForegroundMask, ForegroundMasker, GroupAllOutput, GroupingStrategy, IconGroup, RasterView,
+    RleRun, SheetPipeline, TraceError, TracePreset, VectorTracer,
 };

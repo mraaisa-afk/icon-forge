@@ -2,8 +2,10 @@
 resolver = "2"
 members = [
     "crates/isg-core",
+    "crates/isg-native",
     "spike/groupall",
     "tools/gen-corpus",
+    "src-tauri",
 ]
 
 [workspace.package]
