@@ -742,7 +742,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
                     let ty = margin + row * cell + (cell - s) / 2;
                     if let Some(bbox) = sh.stamp(shape, tx, ty, s as u32, t, 0) {
                         tr.push(IconTruth {
-                            id: truth_len(tr),
+                            id: tr.len() as u32,
                             shape,
                             bbox,
                         });
@@ -783,7 +783,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
                         let ty = margin + row * cellh + (cellh - s) / 2;
                         if let Some(bbox) = sh.stamp(shape, tx, ty, s as u32, t, 0) {
                             tr.push(IconTruth {
-                                id: truth_len(tr),
+                                id: tr.len() as u32,
                                 shape,
                                 bbox,
                             });
