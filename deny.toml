@@ -8,6 +8,17 @@
 #
 # This file must live at the repo root as `deny.toml` — that is the filename
 # cargo-deny (and cargo-deny-action) reads by default.
+#
+# SCHEMA (cargo-deny >= 0.18, "licenses v2" — the only supported schema;
+# EmbarkStudios/cargo-deny#611 removed `copyleft` and the v1 `deny` list):
+#   * Everything NOT in `allow` (or per-crate `exceptions`) is DENIED — the
+#     allow-list below is the single gate.
+#   * Copyleft licenses are denied structurally, with no config override —
+#     even if someone later adds one to `allow`, it stays blocked. This is
+#     stronger than the old explicit `deny = ["GPL-2.0", ...]` list: the
+#     GPL/AGPL/LGPL hard ban is now guaranteed by the tool itself and cannot
+#     be accidentally weakened by an allow-list edit.
+#   * Unlicensed crates (confidence < threshold) are denied.
 
 [graph]
 # Skip heavy graph walks we don't need yet.
@@ -15,6 +26,8 @@ all-features = false
 
 [licenses]
 # Only these licenses may appear anywhere in the resolved graph.
+# (SPDX disjunctions like "MIT OR Unlicense" or "Apache-2.0 WITH
+# LLVM-exception OR ..." pass when ANY alternative is allowed here.)
 allow = [
     "MIT",
     "Apache-2.0",
@@ -27,23 +40,8 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
 ]
-# Copyleft (GPL, AGPL, LGPL and friends) is denied even if a version slips
-# through a renamed license string.
-copyleft = "deny"
 # Anything unidentifiable with high confidence fails the build.
 confidence-threshold = 0.9
-# Explicit hard ban (defense in depth on top of copyleft = "deny").
-deny = [
-    "GPL-2.0",
-    "GPL-2.0-or-later",
-    "GPL-3.0",
-    "GPL-3.0-or-later",
-    "AGPL-3.0",
-    "AGPL-3.0-or-later",
-    "LGPL-2.1",
-    "LGPL-3.0",
-    "SSPL-1.0",
-]
 
 [bans]
 # Duplicate major versions are a review-time smell, not a hard fail (the
