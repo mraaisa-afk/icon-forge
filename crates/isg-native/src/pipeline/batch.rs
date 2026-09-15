@@ -348,18 +348,20 @@ mod tests {
     use crate::db::NewSheet;
     use image::{ExtendedColorType, ImageEncoder};
 
-    /// 96×48 white sheet with two 16×16 squares: near-black at (8,8),
-    /// mid-grey at (56,24). The shades MUST differ — the stage ⑧ cache is
+    /// 96×48 white sheet with two near-black squares: 16×16 at (8,8) and
+    /// 15×15 at (56,24). The crops MUST differ — the stage ⑧ cache is
     /// content-addressed over the crop pixels, so identical crops share one
     /// key and a cold run can legitimately serve the second twin from the
-    /// first's put (race between the parallel items).
+    /// first's put (race between the parallel items). Sizes differ instead
+    /// of shades: mono presets render pure ink, so a mid-grey source would
+    /// legitimately score ~0.87 SSIM (CI actual, run 35005378111).
     fn sheet_bytes() -> Vec<u8> {
         let mut rgba = vec![255u8; 96 * 48 * 4];
-        for &(x0, y0, ink) in &[(8usize, 8usize, 10u8), (56usize, 24usize, 106u8)] {
-            for y in y0..y0 + 16 {
-                for x in x0..x0 + 16 {
+        for (x0, y0, size) in [(8usize, 8usize, 16usize), (56usize, 24usize, 15usize)] {
+            for y in y0..y0 + size {
+                for x in x0..x0 + size {
                     let i = (y * 96 + x) * 4;
-                    rgba[i..i + 3].copy_from_slice(&[ink, ink, ink]);
+                    rgba[i..i + 3].copy_from_slice(&[10, 10, 10]);
                 }
             }
         }
