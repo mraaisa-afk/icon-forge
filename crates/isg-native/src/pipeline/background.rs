@@ -182,11 +182,7 @@ fn detect_kmeans_corners(r: &SheetRaster) -> Option<BackgroundModel> {
     let seed1 = ring
         .iter()
         .copied()
-        .max_by(|a, b| {
-            dist2(*a, seed0)
-                .total_cmp(&dist2(*b, seed0))
-                .then(a.cmp(b))
-        })
+        .max_by(|a, b| dist2(*a, seed0).total_cmp(&dist2(*b, seed0)).then(a.cmp(b)))
         .unwrap();
     let (mut c0, mut c1) = (seed0, seed1);
     for _ in 0..12 {
@@ -205,18 +201,10 @@ fn detect_kmeans_corners(r: &SheetRaster) -> Option<BackgroundModel> {
             }
         }
         if n0 > 0 {
-            c0 = [
-                (s0[0] / n0) as u8,
-                (s0[1] / n0) as u8,
-                (s0[2] / n0) as u8,
-            ];
+            c0 = [(s0[0] / n0) as u8, (s0[1] / n0) as u8, (s0[2] / n0) as u8];
         }
         if n1 > 0 {
-            c1 = [
-                (s1[0] / n1) as u8,
-                (s1[1] / n1) as u8,
-                (s1[2] / n1) as u8,
-            ];
+            c1 = [(s1[0] / n1) as u8, (s1[1] / n1) as u8, (s1[2] / n1) as u8];
         }
     }
     // Border ownership vote → background cluster.
@@ -351,11 +339,7 @@ pub fn build_mask(r: &SheetRaster, bg: &BackgroundModel, p: &SegParams) -> Foreg
             for y in 0..h {
                 for (x, &v) in r.luma_row(y).iter().enumerate() {
                     let v = v.round().clamp(0.0, 255.0) as u8;
-                    let ink = if ink_is_dark {
-                        v <= best_t
-                    } else {
-                        v > best_t
-                    };
+                    let ink = if ink_is_dark { v <= best_t } else { v > best_t };
                     if ink {
                         mask.set(x as u32, y, true);
                     }
@@ -468,7 +452,16 @@ mod tests {
 
     #[test]
     fn white_sheet_black_square_uses_border_consensus() {
-        let r = sheet_with_rect(64, 64, [255, 255, 255, 255], [10, 10, 10, 255], 20, 20, 20, 20);
+        let r = sheet_with_rect(
+            64,
+            64,
+            [255, 255, 255, 255],
+            [10, 10, 10, 255],
+            20,
+            20,
+            20,
+            20,
+        );
         let bg = detect_background(&r, &SegParams::default());
         assert_eq!(bg.kind, BackgroundKind::BorderConsensus);
         assert!(bg.consensus >= 0.85);
@@ -498,7 +491,12 @@ mod tests {
         }
         let r = SheetRaster::from_rgba(w, h, rgba);
         let bg = detect_background(&r, &SegParams::default());
-        assert_eq!(bg.kind, BackgroundKind::BorderConsensus, "kind {:?}", bg.kind);
+        assert_eq!(
+            bg.kind,
+            BackgroundKind::BorderConsensus,
+            "kind {:?}",
+            bg.kind
+        );
         let mask = build_mask(&r, &bg, &SegParams::default());
         let expected = 20 * 20;
         // Tolerance for AA-free but noisy edges must be small — ΔE is the

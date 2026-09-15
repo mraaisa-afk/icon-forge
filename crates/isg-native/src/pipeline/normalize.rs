@@ -5,8 +5,8 @@
 
 use image::{DynamicImage, RgbaImage};
 
-use crate::IsgError;
 use super::raster::SheetRaster;
+use crate::IsgError;
 
 /// Decodes an encoded sheet (PNG/JPEG), applies EXIF orientation, converts
 /// to RGBA8 and caps the larger dimension at `max_dim` (fixed Triangle
@@ -130,8 +130,8 @@ pub fn apply_orientation(img: &mut RgbaImage, orientation: u16) {
 
 #[cfg(test)]
 mod tests {
-    use image::{ExtendedColorType, ImageEncoder};
     use super::*;
+    use image::{ExtendedColorType, ImageEncoder};
 
     /// Encodes RGBA pixels to an in-memory PNG (the pipeline itself only
     /// *decodes*; encoding is test scaffolding).

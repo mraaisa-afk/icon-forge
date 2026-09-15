@@ -46,8 +46,8 @@ pub fn segment(bytes: &[u8], max_dim: u32, params: &SegParams) -> Result<SegOutp
 
 #[cfg(test)]
 mod tests {
-    use image::{ExtendedColorType, ImageEncoder};
     use super::*;
+    use image::{ExtendedColorType, ImageEncoder};
 
     /// Solid white 64×64 sheet, black 20×20 square at (20, 20), two isolated
     /// gray speckles — encoded as PNG bytes via the `image` dev encoder.
@@ -99,7 +99,10 @@ mod tests {
         let b = segment(&bytes, 4096, &params).unwrap();
         assert_eq!(a.mask, b.mask);
         assert_eq!(a.sheet.rgba(), b.sheet.rgba());
-        assert_eq!(a.background.consensus.to_bits(), b.background.consensus.to_bits());
+        assert_eq!(
+            a.background.consensus.to_bits(),
+            b.background.consensus.to_bits()
+        );
     }
 
     #[test]

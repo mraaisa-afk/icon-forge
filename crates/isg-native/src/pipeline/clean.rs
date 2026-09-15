@@ -46,7 +46,12 @@ impl PackedRows {
                 x += take;
             }
         }
-        Self { w, h, stride, words }
+        Self {
+            w,
+            h,
+            stride,
+            words,
+        }
     }
 
     fn to_mask(&self) -> ForegroundMask {
@@ -122,7 +127,12 @@ fn morph_row(p: &PackedRows, y: usize, dilate: bool) -> Vec<u64> {
             .enumerate()
             .map(|(i, &w)| {
                 let l = (w << 1) | if i > 0 { row[i - 1] >> 63 } else { 0 };
-                let r = (w >> 1) | if i + 1 < row.len() { row[i + 1] << 63 } else { 0 };
+                let r = (w >> 1)
+                    | if i + 1 < row.len() {
+                        row[i + 1] << 63
+                    } else {
+                        0
+                    };
                 if dilate {
                     w | l | r
                 } else {
@@ -271,7 +281,17 @@ mod tests {
         let m = mask(
             7,
             7,
-            &[(2, 2), (3, 2), (4, 2), (2, 3), (3, 3), (4, 3), (2, 4), (3, 4), (4, 4)],
+            &[
+                (2, 2),
+                (3, 2),
+                (4, 2),
+                (2, 3),
+                (3, 3),
+                (4, 3),
+                (2, 4),
+                (3, 4),
+                (4, 4),
+            ],
         );
         let e = erode3(&m);
         assert_eq!(runs_of(&e), vec![(3, 3, 4)]);
@@ -313,7 +333,17 @@ mod tests {
         let m = mask(
             7,
             7,
-            &[(2, 2), (3, 2), (4, 2), (2, 3), (3, 3), (4, 3), (2, 4), (3, 4), (4, 4)],
+            &[
+                (2, 2),
+                (3, 2),
+                (4, 2),
+                (2, 3),
+                (3, 3),
+                (4, 3),
+                (2, 4),
+                (3, 4),
+                (4, 4),
+            ],
         );
         let md = median3(&m);
         assert_eq!(md.ink_count(), 5, "plus shape");
@@ -372,7 +402,10 @@ mod tests {
         }
         let m = mask(9, 5, &px);
         assert!(!close(&m, 1).get(3, 1), "3×3 close cannot bridge 3-gap");
-        assert!(close(&m, 2).get(3, 2) && close(&m, 2).get(4, 2), "5×5 close bridges");
+        assert!(
+            close(&m, 2).get(3, 2) && close(&m, 2).get(4, 2),
+            "5×5 close bridges"
+        );
     }
 
     #[test]
@@ -389,7 +422,11 @@ mod tests {
         // Core intact, no phantom growth far away, sane total (16..49).
         assert!(cleaned.get(4, 4) && cleaned.get(5, 5));
         assert!(!cleaned.get(0, 0) && !cleaned.get(15, 15));
-        assert!((16..=49).contains(&cleaned.ink_count()), "{}", cleaned.ink_count());
+        assert!(
+            (16..=49).contains(&cleaned.ink_count()),
+            "{}",
+            cleaned.ink_count()
+        );
 
         px.push((12, 12));
         px.push((14, 14));
