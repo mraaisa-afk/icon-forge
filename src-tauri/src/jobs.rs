@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+use isg_core::TracePreset;
 use isg_native::cache::CacheStore;
 use isg_native::db::Library;
 use isg_native::import::{import_folder, ImportOptions};
 use isg_native::jobs::{Job, JobContext, JobEngine, JobError, JobEvent, JobOutcome, Tier};
-use isg_core::TracePreset;
 use isg_native::pipeline::{vectorize_sheet_batch, BatchError, BatchOptions, SheetRef};
 
 /// Event name used for all job events (payload = [`JobEventDto`]).
@@ -150,9 +150,8 @@ impl Job for VectorizeSheetJob {
             let root = cache_dir_for(lib.path());
             (row.source_path, row.content_hash, root)
         };
-        let bytes = std::fs::read(&source_path).map_err(|e| {
-            JobError::Failed(format!("read {source_path}: {e}"))
-        })?;
+        let bytes = std::fs::read(&source_path)
+            .map_err(|e| JobError::Failed(format!("read {source_path}: {e}")))?;
         let store = CacheStore::new(cache_root);
         let opts = BatchOptions {
             preset: self.preset,
