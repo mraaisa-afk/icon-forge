@@ -337,8 +337,8 @@ fn compare_planes(reference: &[u8], render: &[u8], w: u32, h: u32) -> Score {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::background::BackgroundKind;
-    use super::trace::IconVectors;
+    use super::super::background::BackgroundKind;
+    use super::super::trace::IconVectors;
 
     const SQUARE: &str = "<path d=\"M4,4L12,4L12,12L4,12Z\" fill=\"#0a0a0a\"/>";
     const BG: [u8; 4] = [255, 255, 255, 255];
