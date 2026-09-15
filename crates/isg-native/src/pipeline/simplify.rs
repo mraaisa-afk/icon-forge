@@ -493,7 +493,7 @@ mod tests {
     fn collinear_anchor_is_merged() {
         let d = "M0,0 L10,0 L20,0 L20,10 Z";
         let out = simplify_d(d, &SimplifyParams::default()).unwrap();
-        assert_eq!(out, "M0.00,0.00 L20.00,0.00 L20.00,10.00 Z");
+        assert_eq!(out, "M0.00,0.00 L20.00,0.00 L20.00,10.00Z");
     }
 
     #[test]
@@ -504,14 +504,14 @@ mod tests {
             vis_area_px2: 1000.0,
             ..SimplifyParams::default()
         };
-        assert_eq!(simplify_d(d, &p).unwrap(), "M0.00,0.00 L10.00,0.00 L10.00,10.00 Z");
+        assert_eq!(simplify_d(d, &p).unwrap(), "M0.00,0.00 L10.00,0.00 L10.00,10.00Z");
     }
 
     #[test]
     fn rdp_drops_low_detail_midpoint() {
         let d = "M0,0 L5,0.10 L10,0 L10,10 Z";
         let out = simplify_d(d, &SimplifyParams::default()).unwrap();
-        assert_eq!(out, "M0.00,0.00 L10.00,0.00 L10.00,10.00 Z");
+        assert_eq!(out, "M0.00,0.00 L10.00,0.00 L10.00,10.00Z");
     }
 
     #[test]
@@ -526,7 +526,7 @@ mod tests {
             snap_px: 0.0,
             ..SimplifyParams::default()
         };
-        assert_eq!(simplify_d(d, &p).unwrap(), "M0.00,0.00 L10.00,0.00 L10.00,10.00 Z");
+        assert_eq!(simplify_d(d, &p).unwrap(), "M0.00,0.00 L10.00,0.00 L10.00,10.00Z");
     }
 
     #[test]
@@ -546,7 +546,8 @@ mod tests {
             snap_px: 0.0,
             ..SimplifyParams::default()
         };
-        assert_eq!(simplify_d(d, &p).unwrap(), d);
+        // All passes disabled → geometry passes through; text is canonicalized.
+        assert_eq!(simplify_d(d, &p).unwrap(), "M2.00,3.00 L8.00,3.00 L8.00,9.00Z");
     }
 
     #[test]
@@ -566,7 +567,7 @@ mod tests {
         };
         assert_eq!(
             simplify_d(d, &p).unwrap(),
-            "M0.00,0.00 C1.00,1.00 2.00,1.00 3.00,0.00 L3.00,3.00 Z"
+            "M0.00,0.00 C1.00,1.00 2.00,1.00 3.00,0.00 L3.00,3.00Z"
         );
     }
 
@@ -575,7 +576,7 @@ mod tests {
         // vtracer (optimize >= 1) emits relative commands; the 90° corner
         // at (15,10) is pinned and survives.
         let out = simplify_d("M10,10 l5,0 l0,5 Z", &SimplifyParams::default()).unwrap();
-        assert_eq!(out, "M10.00,10.00 L15.00,10.00 L15.00,15.00 Z");
+        assert_eq!(out, "M10.00,10.00 L15.00,10.00 L15.00,15.00Z");
     }
 
     #[test]
