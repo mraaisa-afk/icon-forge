@@ -348,14 +348,18 @@ mod tests {
     use crate::db::NewSheet;
     use image::{ExtendedColorType, ImageEncoder};
 
-    /// 96×48 white sheet, two 16×16 near-black squares at (8,8) and (56,24).
+    /// 96×48 white sheet with two 16×16 squares: near-black at (8,8),
+    /// mid-grey at (56,24). The shades MUST differ — the stage ⑧ cache is
+    /// content-addressed over the crop pixels, so identical crops share one
+    /// key and a cold run can legitimately serve the second twin from the
+    /// first's put (race between the parallel items).
     fn sheet_bytes() -> Vec<u8> {
         let mut rgba = vec![255u8; 96 * 48 * 4];
-        for &(x0, y0) in &[(8usize, 8usize), (56usize, 24usize)] {
+        for &(x0, y0, ink) in &[(8usize, 8usize, 10u8), (56usize, 24usize, 106u8)] {
             for y in y0..y0 + 16 {
                 for x in x0..x0 + 16 {
                     let i = (y * 96 + x) * 4;
-                    rgba[i..i + 3].copy_from_slice(&[10, 10, 10]);
+                    rgba[i..i + 3].copy_from_slice(&[ink, ink, ink]);
                 }
             }
         }
