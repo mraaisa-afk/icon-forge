@@ -379,7 +379,10 @@ mod tests {
     fn identical_square_scores_near_perfect() {
         let doc = doc_for(SQUARE, 16, 16);
         let s = score_svg(&doc, &crop_square_at4(), BG, 16, 16).unwrap();
-        assert!(s.mae < 0.001, "{s:?}");
+        // The square is [10,10,10] on white, so reference ink is 245, not
+        // 255: mae floors at 64·10/(256·255) ≈ 0.0098 even for a perfect
+        // trace (CI-actual 0.009804 / ssim 0.9984 / iou 1.0 / comp 0.9963).
+        assert!(s.mae < 0.02, "{s:?}");
         assert!(s.ssim > 0.99, "{s:?}");
         assert!(s.iou > 0.98, "{s:?}");
         assert!(s.composite > 0.99, "{s:?}");
