@@ -5,7 +5,7 @@
 //! are RGB outliers but perceptually identical to the background, so a ΔE
 //! threshold cuts speckle sharply without touching real icons.
 
-use isg_core::ForegroundMask;
+use isg_core::{ForegroundMask, RasterView};
 
 use super::raster::SheetRaster;
 
@@ -205,10 +205,18 @@ fn detect_kmeans_corners(r: &SheetRaster) -> Option<BackgroundModel> {
             }
         }
         if n0 > 0 {
-            c0 = [s0[0] / n0, s0[1] / n0, s0[2] / n0];
+            c0 = [
+                (s0[0] / n0) as u8,
+                (s0[1] / n0) as u8,
+                (s0[2] / n0) as u8,
+            ];
         }
         if n1 > 0 {
-            c1 = [s1[0] / n1, s1[1] / n1, s1[2] / n1];
+            c1 = [
+                (s1[0] / n1) as u8,
+                (s1[1] / n1) as u8,
+                (s1[2] / n1) as u8,
+            ];
         }
     }
     // Border ownership vote → background cluster.
