@@ -20,6 +20,11 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vtracer = "1.0.0-alpha.4"
+# Phase 2 vectorization: SVG re-parse + rasterize scoring (resvg, MPL-2.0,
+# unmodified via adapter) and curve/geometry primitives (kurbo).
+# default-features off drops the font/text tree — emitted SVGs have no <text>.
+resvg = { version = "0.48", default-features = false }
+kurbo = "0.13"
 
 # Offline development (sandboxes without crates.io access): build the vendor
 # tree with scripts/fetch_vendor.py, then copy .cargo/config.vendor.toml.example

@@ -11,6 +11,8 @@
 //! * [`db`] — the SQLite library (WAL), schema per ARCHITECTURE.md §4
 //! * [`import`] — streaming folder import (blake3-deduplicated, cancellable)
 //! * [`cache`] — content-addressed blake3/zstd payload cache (§3.3 stage 8)
+//! * [`pipeline`] — §3.3 auto-vectorization stages (normalize → background →
+//!   clean → … → score; quantize/trace/simplify/emit land in W2/W3)
 //! * [`project`] — atomic `.isgproj` save/open (kill-safe by construction)
 //! * [`jobs`] — T0/T1/T2 job engine with cancellation and preemption
 #![deny(unsafe_code)]
@@ -21,6 +23,7 @@ pub mod cancel;
 pub mod db;
 pub mod import;
 pub mod jobs;
+pub mod pipeline;
 pub mod project;
 
 /// Error type shared by the native glue modules.
