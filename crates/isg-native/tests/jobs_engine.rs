@@ -98,7 +98,13 @@ impl Job for Spinner {
     }
     fn run(&self, ctx: &JobContext) -> Result<String, JobError> {
         for i in 0..self.steps {
-            ctx.progress(i, self.steps, "spinning");
+            // Throttle progress to one event per ~2^20 steps: the tap in the
+            // tests consumes a fixed event budget, and 5*10^8 events would
+            // bury the Finished/Started events under it. Cancellation is
+            // still observed every step.
+            if i.is_multiple_of(1_048_576) {
+                ctx.progress(i, self.steps, "spinning");
+            }
             ctx.check()?;
         }
         Ok(format!("done after {} steps", self.steps))

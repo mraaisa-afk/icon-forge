@@ -134,6 +134,17 @@ pub(crate) fn apply_pragmas(conn: &Connection) -> crate::Result<()> {
             "journal_mode is '{mode}', expected wal"
         )));
     }
+    finish_pragmas(conn)
+}
+
+/// Pragmas for in-memory libraries (tests only): WAL requires a file-backed
+/// database, so the memory journal is the correct — and asserted — mode.
+pub(crate) fn apply_memory_pragmas(conn: &Connection) -> crate::Result<()> {
+    conn.execute_batch("PRAGMA journal_mode=MEMORY;")?;
+    finish_pragmas(conn)
+}
+
+fn finish_pragmas(conn: &Connection) -> crate::Result<()> {
     conn.execute_batch(
         "PRAGMA synchronous=NORMAL;
          PRAGMA foreign_keys=ON;
@@ -213,10 +224,11 @@ impl Library {
         })
     }
 
-    /// In-memory library for tests.
+    /// In-memory library for tests (memory journal — see
+    /// [`apply_memory_pragmas`]).
     pub fn open_in_memory() -> crate::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        apply_pragmas(&conn)?;
+        apply_memory_pragmas(&conn)?;
         migrate(&conn)?;
         Ok(Self {
             conn,

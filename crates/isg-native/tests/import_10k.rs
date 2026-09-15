@@ -61,7 +61,16 @@ fn write_png(path: &Path, index: u32) {
     for y in 0..h {
         raw.push(0u8);
         for x in 0..w {
-            let v = ((index as u64 * 31 + (x + y) as u64 * 7) % 256) as u8;
+            // Pixels (0,0) and (1,0) carry the index low/high bytes so every
+            // index below 65,536 produces distinct content; the rest follow
+            // a simple formula. Without the index bytes the formula repeats
+            // every 256 indices (31 * 256 ≡ 0 mod 256) and dedupe would
+            // collapse 10,000 files to 256.
+            let v = match (x, y) {
+                (0, 0) => (index & 0xFF) as u8,
+                (1, 0) => ((index >> 8) & 0xFF) as u8,
+                _ => ((index as u64 * 31 + (x + y) as u64 * 7) % 256) as u8,
+            };
             raw.push(v);
         }
     }

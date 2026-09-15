@@ -58,10 +58,11 @@ fn remove_stale_tmp(target: &Path) {
 }
 
 fn fsync_file(path: &Path) -> std::io::Result<()> {
-    let mut f = fs::File::open(path)?;
-    f.sync_all()?;
-    f.flush()?;
-    Ok(())
+    // Windows `FlushFileBuffers` requires a handle with GENERIC_WRITE; a
+    // read-only handle (plain `File::open`) fails with Access Denied there
+    // even though fsync(2) accepts read-only fds on Unix.
+    let f = fs::OpenOptions::new().write(true).open(path)?;
+    f.sync_all()
 }
 
 fn open_conn(path: &Path) -> crate::Result<Connection> {
@@ -203,9 +204,12 @@ mod tests {
         seed(&mut lib, 3);
         lib.save_as(&dest).unwrap();
 
-        let snap = Library::open(&dest).unwrap();
-        snap.verify_integrity().unwrap();
-        assert_eq!(snap.sheet_count().unwrap(), 3);
+        {
+            let snap = Library::open(&dest).unwrap();
+            snap.verify_integrity().unwrap();
+            assert_eq!(snap.sheet_count().unwrap(), 3);
+        } // drop the snapshot handle: overwriting a file another connection
+        // still holds open is denied on Windows.
         // Save-as snapshot excludes rows inserted afterwards.
         seed(&mut lib, 2);
         lib.save_as(&dest).unwrap();
