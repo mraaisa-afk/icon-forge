@@ -52,7 +52,7 @@ struct ScannedPath {
 /// Finds `name="…"` in an attribute string; returns the value and the
 /// `(start, end)` byte span of the whole `name="…"` chunk. A preceding
 /// `-` or alphanumeric (as in `stroke-width=` for `width=`) is rejected.
-fn extract_attr(attrs: &str, name: &str) -> Option<(&str, (usize, usize))> {
+fn extract_attr<'a>(attrs: &'a str, name: &str) -> Option<(&'a str, (usize, usize))> {
     let needle = format!("{name}=\"");
     let start = attrs.find(&needle).filter(|&i| {
         i == 0 || !attrs[..i].ends_with(|c: char| c.is_alphanumeric() || c == '-')

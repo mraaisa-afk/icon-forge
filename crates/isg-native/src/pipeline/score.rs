@@ -152,7 +152,7 @@ pub fn score_svg(
     w: u32,
     h: u32,
 ) -> Result<Score, ScoreError> {
-    if w == 0 || h == 0 || crop_rgba.len() != 4 * usize::from(w) * usize::from(h) {
+    if w == 0 || h == 0 || crop_rgba.len() != 4 * w as usize * h as usize {
         return Err(ScoreError::SizeMismatch);
     }
     let tree = resvg::usvg::Tree::from_str(doc, &resvg::usvg::Options::default())
@@ -162,7 +162,7 @@ pub fn score_svg(
     let sy = h as f32 / size.height();
     let mut pm = resvg::tiny_skia::Pixmap::new(w, h)
         .ok_or_else(|| ScoreError::Render("pixmap allocation failed".to_string()))?;
-    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(sx, sy), pm.as_mut());
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(sx, sy), &mut pm.as_mut());
     // Premultiplied RGBA bytes; the alpha byte is unaffected by the
     // premultiplication.
     let render_plane: Vec<u8> = pm.data().chunks_exact(4).map(|p| p[3]).collect();
@@ -251,7 +251,7 @@ fn ssim_planes(a: &[u8], b: &[u8], w: u32, h: u32) -> f64 {
     const C1: f64 = 6.5025;
     const C2: f64 = 58.5225;
     let mut total = 0.0f64;
-    let mut blocks = 0u64;
+    let mut blocks = 0u32;
     let mut y0 = 0u32;
     while y0 < h {
         let bh = SSIM_BLOCK.min(h - y0);
