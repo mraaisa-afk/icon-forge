@@ -151,7 +151,7 @@ impl Job for VectorizeSheetJob {
             (row.source_path, row.content_hash, root)
         };
         let bytes = std::fs::read(&source_path).map_err(|e| {
-            JobError::Failed(format!("read {}: {e}", source_path.display()))
+            JobError::Failed(format!("read {source_path}: {e}"))
         })?;
         let store = CacheStore::new(cache_root);
         let opts = BatchOptions {
