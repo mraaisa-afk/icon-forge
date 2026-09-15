@@ -24,7 +24,7 @@ use rayon::prelude::*;
 
 use crate::cache::CacheStore;
 use crate::cancel::CancellationToken;
-use crate::db::{IconVectorRow, Library, NewSheet};
+use crate::db::{IconVectorRow, Library};
 use crate::rss::{current_rss_bytes, RssWatcher};
 
 use super::background::BackgroundModel;
@@ -257,7 +257,7 @@ pub fn vectorize_sheet_batch(
                 ),
             };
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if d % 16 == 0 || d == total {
+            if d.is_multiple_of(16) || d == total {
                 progress(d, total);
             }
             Ok(ItemResult {
@@ -345,6 +345,7 @@ pub fn vectorize_sheet_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::NewSheet;
     use image::{ExtendedColorType, ImageEncoder};
 
     /// 96×48 white sheet, two 16×16 near-black squares at (8,8) and (56,24).
