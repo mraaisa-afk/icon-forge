@@ -1,15 +1,20 @@
-//! §3.3 auto-vectorization pipeline — raster normalization, background
-//! detection, mask cleaning (stages ①–③). Quantize/trace/simplify/emit/
-//! score land in W2–W3 behind the same facade.
+//! §3.3 auto-vectorization pipeline — segmentation (stages ①–③), colour
+//! quantization (④), preset-profiled vtracer tracing (⑤) and the custom
+//! geometry simplify pass (⑥). Emit+validate (⑦) and score+cache (⑧) land
+//! in W3; batch orchestration in W4.
 //!
 //! Every stage is byte-deterministic: same input bytes + same
-//! [`SegParams`] → identical output, which is what makes the vectorization
-//! cache (stage ⑧) sound.
+//! [`SegParams`]/preset → identical output, which is what makes the
+//! vectorization cache (stage ⑧) sound.
 
 pub mod background;
 pub mod clean;
 pub mod normalize;
+pub mod profiles;
+pub mod quantize;
 pub mod raster;
+pub mod simplify;
+pub mod trace;
 
 use isg_core::ForegroundMask;
 
@@ -18,7 +23,11 @@ use crate::IsgError;
 pub use background::{BackgroundKind, BackgroundModel, SegParams};
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
 pub use normalize::normalize;
+pub use profiles::{TraceProfile, profile};
+pub use quantize::{Layer, QuantizeParams};
 pub use raster::SheetRaster;
+pub use simplify::SimplifyParams;
+pub use trace::{IconVectors, vectorize_icon};
 
 /// Result of the segmentation stages (①–③).
 #[derive(Clone, Debug)]

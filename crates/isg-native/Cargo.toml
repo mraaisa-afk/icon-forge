@@ -15,5 +15,6 @@ zstd = "0.13"
 image = { workspace = true }
 kurbo = { workspace = true }
 resvg = { workspace = true }
+vtracer = { workspace = true }
 
 [dev-dependencies]
