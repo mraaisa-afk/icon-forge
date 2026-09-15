@@ -145,15 +145,13 @@ mod tests {
 
     #[test]
     fn normalizes_png_to_rgba8_luma() {
-        let px: Vec<u8> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 10, 11, 12, 13, 14, 15]
-            .iter()
-            .flat_map(|&v| [v, 0, 0, 255])
-            .collect();
+        // 6 pixels (3×2): red levels 1..=6, opaque.
+        let px: Vec<u8> = (1u8..=6).flat_map(|v| [v, 0, 0, 255]).collect();
         let bytes = png_bytes(3, 2, &px);
         let r = normalize(&bytes, 4096).unwrap();
         assert_eq!((r.width(), r.height()), (3, 2));
         assert_eq!(r.pixel(0, 0), [1, 0, 0, 255]);
-        assert_eq!(r.pixel(2, 1), [15, 0, 0, 255]);
+        assert_eq!(r.pixel(2, 1), [6, 0, 0, 255]);
     }
 
     #[test]

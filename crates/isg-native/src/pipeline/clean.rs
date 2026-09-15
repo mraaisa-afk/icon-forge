@@ -294,10 +294,14 @@ mod tests {
         assert!(d.get(62, 2) && d.get(65, 2) && d.get(94, 2) && d.get(99, 2));
         assert!(!d.get(61, 2), "dilation stays within ±1");
         let e = erode3(&d);
+        // d is a 5-row band (rows 0..4) of {62..65} ∪ {94..99}; erosion of a
+        // band leaves rows 1..=3 with the x-kernel core {63,64} ∪ {95..98}.
         assert!(!e.get(62, 2) && !e.get(65, 2), "edge pixels erode away");
         assert!(e.get(63, 2) && e.get(64, 2));
         assert!(e.get(95, 2) && e.get(96, 2) && e.get(97, 2) && e.get(98, 2));
-        assert_eq!(e.ink_count(), 6);
+        assert!(e.get(63, 1) && e.get(98, 3), "inner rows survive too");
+        assert!(!e.get(63, 0) && !e.get(63, 4), "outer rows erode away");
+        assert_eq!(e.ink_count(), 18);
     }
 
     #[test]
@@ -346,16 +350,19 @@ mod tests {
         let m = mask(8, 4, &px);
         let c = close3(&m);
         assert!(c.get(2, 1) && c.get(3, 1), "gap bridged");
-        assert_eq!(c.ink_count(), 4, "single-row core, cols 1..=4");
-        assert_eq!(runs_of(&c), vec![(1, 1, 5)]);
+        // Dilated blocks merge to cols 0..=6 (rows 0..2); the erosion core
+        // is a single row, cols 1..=5.
+        assert_eq!(c.ink_count(), 5);
+        assert_eq!(runs_of(&c), vec![(1, 1, 6)]);
     }
 
     #[test]
     fn close_passes_2_uses_wider_kernel() {
-        // Two blocks 3 apart (gap cols 2..5 is 3 wide): close(3) cannot
-        // bridge, the double-dilate of close(5) can.
+        // Two 3-row-tall blocks 3 apart (gap cols 2..5): close(3) cannot
+        // bridge, the double-dilate of close(5) can. (Blocks must be ≥3
+        // rows tall or the second erosion annihilates the thin core.)
         let mut px = Vec::new();
-        for y in 0..2 {
+        for y in 0..3 {
             for x in 0..2 {
                 px.push((x, y));
             }
@@ -363,7 +370,7 @@ mod tests {
                 px.push((x, y));
             }
         }
-        let m = mask(9, 4, &px);
+        let m = mask(9, 5, &px);
         assert!(!close(&m, 1).get(3, 1), "3×3 close cannot bridge 3-gap");
         assert!(close(&m, 2).get(3, 2) && close(&m, 2).get(4, 2), "5×5 close bridges");
     }

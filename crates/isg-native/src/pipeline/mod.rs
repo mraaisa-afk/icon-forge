@@ -76,11 +76,14 @@ mod tests {
         let out = segment(&sheet_bytes(), 4096, &params).unwrap();
         assert_eq!(out.background.kind, BackgroundKind::BorderConsensus);
         assert_eq!(out.mask.width(), 64);
-        assert!(out.mask.get(20, 20) && out.mask.get(39, 39));
+        // median(3) cuts the square's 4 corner pixels and close's erosion
+        // re-cuts them, so the exact corners never come back — assert the
+        // inner corners instead.
+        assert!(out.mask.get(21, 21) && out.mask.get(38, 38));
+        assert!(!out.mask.get(20, 20), "corner stays cut");
         assert!(!out.mask.get(5, 5), "speckle cleaned");
         assert!(!out.mask.get(50, 60), "speckle cleaned");
-        // 20×20 square: median cuts 4 corners, morphology heals the core —
-        // stay within sane bounds rather than pinning the exact shape.
+        // 20×20 square minus its 4 corner pixels = 396.
         assert!(
             (300..=400).contains(&out.mask.ink_count()),
             "ink {}",
