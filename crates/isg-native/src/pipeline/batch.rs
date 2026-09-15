@@ -19,7 +19,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use isg_core::TracePreset;
+use isg_core::{TracePreset, GroupingStrategy};
 use rayon::prelude::*;
 
 use crate::cache::CacheStore;
@@ -207,7 +207,7 @@ pub fn vectorize_sheet_batch(
     let seg_str = opts.seg.to_cache_string();
     let done = Arc::new(AtomicU64::new(0));
     let cancelled = || {
-        VectorizeError::Cache(crate::IsgError::Cancelled("batch cancelled".to_string()))
+        VectorizeError::Cache(crate::IsgError::Cancelled(crate::cancel::Cancelled))
     };
     let items: Vec<Result<ItemResult, VectorizeError>> = groups
         .par_iter()
@@ -317,7 +317,8 @@ pub fn vectorize_sheet_batch(
         guard
             .as_mut()
             .ok_or(BatchError::NoProject)?
-            .replace_sheet_icons(&sheet_ref.id, &rows)?;
+            .replace_sheet_icons(&sheet_ref.id, &rows)
+            .map_err(BatchError::Segment)?;
     }
 
     progress(u64::from(ok), total);

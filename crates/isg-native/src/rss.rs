@@ -37,7 +37,10 @@ fn rss_linux() -> Option<u64> {
     None
 }
 
+/// The only `unsafe` in the workspace: a read-only PSAPI query against
+/// our own process pseudo-handle (Windows API contract, not our data).
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn rss_windows() -> Option<u64> {
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
@@ -109,6 +112,7 @@ impl Drop for RssWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn current_rss_is_reported_on_supported_platforms() {
