@@ -28,9 +28,9 @@ pub use background::{BackgroundKind, BackgroundModel, SegParams};
 pub use batch::{
     vectorize_sheet_batch, BatchError, BatchOptions, BatchSummary, SharedLibrary, SheetRef,
 };
-pub use group::CclGrouper;
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
 pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
+pub use group::CclGrouper;
 pub use normalize::normalize;
 pub use profiles::{profile, TraceProfile};
 pub use quantize::{Layer, QuantizeParams};

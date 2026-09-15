@@ -70,10 +70,10 @@ impl GroupingStrategy for CclGrouper {
                     continue;
                 }
                 parent[i] = i as i32; // new set
-                // Neighbours: (x-1,y-1) (x-1,y) (x-1,y+1) (x,y-1). The
-                // `nx >= w` bound matters: without it, the (x+1, y-1)
-                // neighbour of a last-column pixel wraps to column 0 of row
-                // `y` and merges opposite sheet edges.
+                                      // Neighbours: (x-1,y-1) (x-1,y) (x-1,y+1) (x,y-1). The
+                                      // `nx >= w` bound matters: without it, the (x+1, y-1)
+                                      // neighbour of a last-column pixel wraps to column 0 of row
+                                      // `y` and merges opposite sheet edges.
                 for &(dx, dy) in &[(1i32, 1i32), (0, 1), (-1, 1), (1, 0)] {
                     let nx = x - dx;
                     let ny = y - dy;

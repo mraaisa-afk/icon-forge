@@ -19,7 +19,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use isg_core::{TracePreset, GroupingStrategy};
+use isg_core::{GroupingStrategy, TracePreset};
 use rayon::prelude::*;
 
 use crate::cache::CacheStore;
@@ -139,7 +139,9 @@ fn lock_lib_any(
     slot: &SharedLibrary,
 ) -> Result<std::sync::MutexGuard<'_, Option<Library>>, VectorizeError> {
     slot.lock().map_err(|_| {
-        VectorizeError::Cache(crate::IsgError::Corrupt("library mutex poisoned".to_string()))
+        VectorizeError::Cache(crate::IsgError::Corrupt(
+            "library mutex poisoned".to_string(),
+        ))
     })
 }
 
@@ -158,7 +160,9 @@ fn compute_and_store(
     let payload = serde_json::to_vec(&icon).map_err(|e| VectorizeError::Json(e.to_string()))?;
     let guard = lock_lib_any(lib_slot)?;
     let lib = guard.as_ref().ok_or_else(|| {
-        VectorizeError::Cache(crate::IsgError::Corrupt("library vanished mid-batch".to_string()))
+        VectorizeError::Cache(crate::IsgError::Corrupt(
+            "library vanished mid-batch".to_string(),
+        ))
     })?;
     cache.put(lib, key, &payload)?;
     Ok(icon)
@@ -206,9 +210,7 @@ pub fn vectorize_sheet_batch(
 
     let seg_str = opts.seg.to_cache_string();
     let done = Arc::new(AtomicU64::new(0));
-    let cancelled = || {
-        VectorizeError::Cache(crate::IsgError::Cancelled(crate::cancel::Cancelled))
-    };
+    let cancelled = || VectorizeError::Cache(crate::IsgError::Cancelled(crate::cancel::Cancelled));
     let items: Vec<Result<ItemResult, VectorizeError>> = groups
         .par_iter()
         .map(|g| -> Result<ItemResult, VectorizeError> {
@@ -371,7 +373,11 @@ mod tests {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        (CacheStore::new(&dir), Mutex::new(Some(Library::open_in_memory().unwrap())), dir)
+        (
+            CacheStore::new(&dir),
+            Mutex::new(Some(Library::open_in_memory().unwrap())),
+            dir,
+        )
     }
 
     const HASH: &str = "abcd";

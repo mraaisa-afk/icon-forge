@@ -417,7 +417,10 @@ impl Library {
         rows: &[IconVectorRow],
     ) -> crate::Result<usize> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM icons WHERE sheet_id = ?1", rusqlite::params![sheet_id])?;
+        tx.execute(
+            "DELETE FROM icons WHERE sheet_id = ?1",
+            rusqlite::params![sheet_id],
+        )?;
         let mut inserted = 0usize;
         for r in rows {
             tx.execute(
@@ -431,8 +434,16 @@ impl Library {
                     r.bbox.1,
                     r.bbox.2,
                     r.bbox.3,
-                    if r.svg_key.is_empty() { None } else { Some(&r.svg_key) },
-                    if r.preset.is_empty() { None } else { Some(&r.preset) },
+                    if r.svg_key.is_empty() {
+                        None
+                    } else {
+                        Some(&r.svg_key)
+                    },
+                    if r.preset.is_empty() {
+                        None
+                    } else {
+                        Some(&r.preset)
+                    },
                     r.mae,
                     r.ssim,
                     r.iou,
@@ -557,10 +568,7 @@ mod tests {
         assert_eq!(found.width, 96);
         assert!(lib.sheet_by_id(&[8; 16]).unwrap().is_none());
 
-        let rows = vec![
-            vector_row((8, 8, 16, 16)),
-            vector_row((56, 24, 16, 16)),
-        ];
+        let rows = vec![vector_row((8, 8, 16, 16)), vector_row((56, 24, 16, 16))];
         assert_eq!(lib.replace_sheet_icons(&[9; 16], &rows).unwrap(), 2);
         assert_eq!(lib.icon_count().unwrap(), 2);
 

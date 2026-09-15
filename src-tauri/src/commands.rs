@@ -11,9 +11,7 @@ use isg_core::{Bbox, TracePreset};
 use isg_native::cache::CacheStore;
 use isg_native::db::Library;
 use isg_native::jobs::{JobEngine, JobId};
-use isg_native::pipeline::{
-    cached_vectorize, segment, SegParams, VectorizeError,
-};
+use isg_native::pipeline::{cached_vectorize, segment, SegParams, VectorizeError};
 
 use crate::jobs::{cache_dir_for, ImportJob, VectorizeSheetJob};
 use crate::state::App;
@@ -351,11 +349,9 @@ pub fn vectorize_icon(
             message: "no project is open".into(),
         });
     };
-    let row = lib
-        .sheet_by_id(&id)?
-        .ok_or_else(|| CmdError {
-            message: "sheet not found".into(),
-        })?;
+    let row = lib.sheet_by_id(&id)?.ok_or_else(|| CmdError {
+        message: "sheet not found".into(),
+    })?;
     let store = CacheStore::new(cache_dir_for(lib.path()));
     let bytes = std::fs::read(&row.source_path).map_err(|e| CmdError {
         message: format!("read {}: {e}", row.source_path),
