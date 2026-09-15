@@ -28,8 +28,10 @@ impl App {
     pub fn lock(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, Option<Library>>, crate::commands::CmdError> {
-        self.library_slot.lock().map_err(|_| crate::commands::CmdError {
-            message: "library mutex poisoned".into(),
-        })
+        self.library_slot
+            .lock()
+            .map_err(|_| crate::commands::CmdError {
+                message: "library mutex poisoned".into(),
+            })
     }
 }

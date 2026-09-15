@@ -425,7 +425,9 @@ fn worker_loop(shared: Arc<Shared>) {
                 // decision is collected under shared borrows, the write
                 // happens after.
                 let preempt = match (&g.running, g.highest_queued_tier()) {
-                    (Some(run), Some(tier)) if tier < run.tier && g.pending_preempt != Some(run.id) => {
+                    (Some(run), Some(tier))
+                        if tier < run.tier && g.pending_preempt != Some(run.id) =>
+                    {
                         let id = run.id;
                         run.token.cancel();
                         Some(id)

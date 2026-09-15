@@ -62,9 +62,8 @@ impl CacheStore {
         fs::rename(&tmp, &path)?;
         lib.cache_put(
             key,
-            path.to_str().ok_or_else(|| {
-                IsgError::Corrupt("cache path is not valid UTF-8".to_string())
-            })?,
+            path.to_str()
+                .ok_or_else(|| IsgError::Corrupt("cache path is not valid UTF-8".to_string()))?,
         )?;
         Ok(path)
     }
@@ -99,15 +98,24 @@ mod tests {
         let key2 = CacheStore::cache_key(b"different", "mono-clean", "{bg:255}", 1);
         assert_ne!(key, key2, "distinct inputs → distinct keys");
         // Key stability: same inputs, same key.
-        assert_eq!(key, CacheStore::cache_key(b"hello world", "mono-clean", "{bg:255}", 1));
+        assert_eq!(
+            key,
+            CacheStore::cache_key(b"hello world", "mono-clean", "{bg:255}", 1)
+        );
 
         assert_eq!(store.get(&lib, &key).unwrap(), None, "miss before put");
         store.put(&lib, &key, b"hello world").unwrap();
-        assert_eq!(store.get(&lib, &key).unwrap(), Some(b"hello world".to_vec()));
+        assert_eq!(
+            store.get(&lib, &key).unwrap(),
+            Some(b"hello world".to_vec())
+        );
 
         // Overwrite is idempotent.
         store.put(&lib, &key, b"hello world v2").unwrap();
-        assert_eq!(store.get(&lib, &key).unwrap(), Some(b"hello world v2".to_vec()));
+        assert_eq!(
+            store.get(&lib, &key).unwrap(),
+            Some(b"hello world v2".to_vec())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

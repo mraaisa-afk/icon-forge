@@ -89,10 +89,8 @@ impl Library {
         remove_stale_tmp(&path);
         let tmp = tmp_path(&path);
         // VACUUM INTO refuses to overwrite; any leftover was removed above.
-        self.conn().execute(
-            "VACUUM INTO ?1",
-            rusqlite::params![&*tmp.to_string_lossy()],
-        )?;
+        self.conn()
+            .execute("VACUUM INTO ?1", rusqlite::params![&*tmp.to_string_lossy()])?;
 
         // 3) Durability before the swap.
         fsync_file(&tmp)?;
@@ -138,10 +136,8 @@ impl Library {
         remove_stale_tmp(dest);
         let tmp = tmp_path(dest);
         self.checkpoint_wal()?;
-        self.conn().execute(
-            "VACUUM INTO ?1",
-            rusqlite::params![&*tmp.to_string_lossy()],
-        )?;
+        self.conn()
+            .execute("VACUUM INTO ?1", rusqlite::params![&*tmp.to_string_lossy()])?;
         fsync_file(&tmp)?;
         fs::rename(&tmp, dest)?;
         Ok(())
@@ -209,8 +205,8 @@ mod tests {
             snap.verify_integrity().unwrap();
             assert_eq!(snap.sheet_count().unwrap(), 3);
         } // drop the snapshot handle: overwriting a file another connection
-        // still holds open is denied on Windows.
-        // Save-as snapshot excludes rows inserted afterwards.
+          // still holds open is denied on Windows.
+          // Save-as snapshot excludes rows inserted afterwards.
         seed(&mut lib, 3, 2);
         lib.save_as(&dest).unwrap();
         let snap2 = Library::open(&dest).unwrap();

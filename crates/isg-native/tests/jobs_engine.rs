@@ -38,8 +38,7 @@ impl Watchdog {
 
 impl Drop for Watchdog {
     fn drop(&mut self) {
-        self.stop
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }

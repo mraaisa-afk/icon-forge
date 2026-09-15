@@ -153,11 +153,7 @@ fn kill_across_delay_range_still_opens() {
         assert!(sheets >= 1, "round {round} (kill at {delay_ms} ms): opens");
         drop(lib);
         let lib2 = Library::open(&project).unwrap();
-        assert_eq!(
-            lib2.sheet_count().unwrap(),
-            sheets,
-            "round {round}: stable"
-        );
+        assert_eq!(lib2.sheet_count().unwrap(), sheets, "round {round}: stable");
     }
     let _ = fs::remove_dir_all(&dir);
 }

@@ -112,7 +112,10 @@ impl ForegroundMask {
     /// Panics when `i` is outside the mask (debug builds).
     #[must_use]
     pub fn get_index(&self, i: usize) -> bool {
-        debug_assert!(i < self.pixel_count() as usize, "mask index {i} out of range");
+        debug_assert!(
+            i < self.pixel_count() as usize,
+            "mask index {i} out of range"
+        );
         self.bits[i >> 6] & (1u64 << (i & 63)) != 0
     }
 
@@ -130,7 +133,10 @@ impl ForegroundMask {
     /// # Panics
     /// Panics when `i` is outside the mask (debug builds).
     pub fn set_index(&mut self, i: usize, value: bool) {
-        debug_assert!(i < self.pixel_count() as usize, "mask index {i} out of range");
+        debug_assert!(
+            i < self.pixel_count() as usize,
+            "mask index {i} out of range"
+        );
         let bit = 1u64 << (i & 63);
         let word = &mut self.bits[i >> 6];
         if value {

@@ -645,7 +645,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-                        Box::new(|rng, sh, tr| {
+            Box::new(|rng, sh, tr| {
                 build_grid(
                     rng,
                     sh,
@@ -666,7 +666,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             244,
             false,
             Output::GrayPng,
-                        Box::new(|rng, sh, tr| {
+            Box::new(|rng, sh, tr| {
                 build_grid(
                     rng,
                     sh,
@@ -729,7 +729,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-                        Box::new(|rng, sh, tr| {
+            Box::new(|rng, sh, tr| {
                 build_grid(
                     rng,
                     sh,
@@ -809,7 +809,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-                        Box::new(|rng, sh, tr| {
+            Box::new(|rng, sh, tr| {
                 build_grid(
                     rng,
                     sh,
@@ -873,7 +873,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             false,
             Output::GrayPng,
-                        Box::new(|rng, sh, tr| {
+            Box::new(|rng, sh, tr| {
                 build_grid(
                     rng,
                     sh,
@@ -894,7 +894,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             255,
             true,
             Output::GrayPng,
-                        Box::new(|rng, sh, tr| {
+            Box::new(|rng, sh, tr| {
                 build_grid(
                     rng,
                     sh,
@@ -915,7 +915,7 @@ pub fn generate_all(out_dir: &Path) -> usize {
             247,
             false,
             Output::Jpeg,
-                        Box::new(|rng, sh, tr| {
+            Box::new(|rng, sh, tr| {
                 build_grid(
                     rng,
                     sh,

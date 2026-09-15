@@ -10,9 +10,7 @@ use tauri::{AppHandle, Emitter};
 
 use isg_native::db::Library;
 use isg_native::import::{import_folder, ImportOptions};
-use isg_native::jobs::{
-    Job, JobContext, JobEngine, JobError, JobEvent, JobOutcome, Tier,
-};
+use isg_native::jobs::{Job, JobContext, JobEngine, JobError, JobEvent, JobOutcome, Tier};
 
 /// Event name used for all job events (payload = [`JobEventDto`]).
 pub const JOB_EVENT: &str = "job://event";

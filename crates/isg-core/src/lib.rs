@@ -393,7 +393,10 @@ mod tests {
         let u = a.union(&b);
         assert_eq!(u, Bbox::new(0, 0, 15, 15).unwrap());
         let c = Bbox::new(10, 10, 5, 5).unwrap();
-        assert!(!a.intersects(&c), "corner touch is not intersection (pixel-based)");
+        assert!(
+            !a.intersects(&c),
+            "corner touch is not intersection (pixel-based)"
+        );
         assert_eq!(a.union(&Bbox::empty()), a);
     }
 

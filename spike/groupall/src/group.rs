@@ -75,7 +75,7 @@ impl GroupingStrategy for CclGrouper {
                     continue;
                 }
                 parent[i] = i as i32; // new set
-                // neighbours: (x-1,y-1) (x-1,y) (x-1,y+1) (x,y-1)
+                                      // neighbours: (x-1,y-1) (x-1,y) (x-1,y+1) (x,y-1)
                 for &(dx, dy) in &[(1i32, 1i32), (0, 1), (-1, 1), (1, 0)] {
                     let nx = x - dx;
                     let ny = y - dy;
@@ -104,15 +104,13 @@ impl GroupingStrategy for CclGrouper {
                     continue;
                 }
                 let root = uf_find(&mut parent, i);
-                let st = stats
-                    .entry(root)
-                    .or_insert(CclStats {
-                        minx: x,
-                        miny: y,
-                        maxx: x,
-                        maxy: y,
-                        area: 0,
-                    });
+                let st = stats.entry(root).or_insert(CclStats {
+                    minx: x,
+                    miny: y,
+                    maxx: x,
+                    maxy: y,
+                    area: 0,
+                });
                 st.minx = st.minx.min(x);
                 st.miny = st.miny.min(y);
                 st.maxx = st.maxx.max(x);

@@ -251,7 +251,9 @@ impl Library {
         if status != "ok" {
             return Err(IsgError::Corrupt(format!("quick_check: {status}")));
         }
-        let v: i64 = self.conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
+        let v: i64 = self
+            .conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))?;
         if v != SCHEMA_VERSION {
             return Err(IsgError::Corrupt(format!(
                 "schema version {v}, expected {SCHEMA_VERSION}"
@@ -342,13 +344,17 @@ impl Library {
 
     /// Total sheet count (library header / pagination).
     pub fn sheet_count(&self) -> crate::Result<u64> {
-        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM sheets", [], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sheets", [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
     }
 
     /// Total icon count.
     pub fn icon_count(&self) -> crate::Result<u64> {
-        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM icons", [], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM icons", [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
     }
 
@@ -399,7 +405,8 @@ impl Library {
     pub fn checkpoint_wal(&self) -> crate::Result<()> {
         // wal_checkpoint returns a result row; sqlite3_exec (execute_batch)
         // discards rows, which is exactly what we want.
-        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 

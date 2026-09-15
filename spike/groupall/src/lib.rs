@@ -8,9 +8,9 @@
 //! decode ─▶ mask (border-median) ─▶ CCL group ─▶ trace (vtracer, rayon) ─▶ SVGs
 //! ```
 
-pub mod raster;
-pub mod mask;
 pub mod group;
-pub mod trace;
+pub mod mask;
 pub mod pipeline;
+pub mod raster;
 pub mod report;
+pub mod trace;
