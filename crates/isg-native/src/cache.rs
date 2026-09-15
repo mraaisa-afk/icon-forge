@@ -7,11 +7,16 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use blake3::Hasher;
 
 use crate::db::Library;
 use crate::IsgError;
+
+/// Process-wide put counter: keeps concurrent writes of the same key on
+/// distinct temp paths (write-then-rename stays race-free).
+static PUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Filesystem-backed cache store with a SQLite index.
 pub struct CacheStore {
@@ -57,7 +62,10 @@ impl CacheStore {
         let compressed = zstd::stream::encode_all(payload, 3)?;
         // Write-then-rename so a crash never leaves a truncated payload
         // claiming a valid path.
-        let tmp = shard.join(format!("{key}.zst.tmp"));
+        let tmp = shard.join(format!(
+            "{key}.{}.zst.tmp",
+            PUT_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::write(&tmp, &compressed)?;
         fs::rename(&tmp, &path)?;
         lib.cache_put(

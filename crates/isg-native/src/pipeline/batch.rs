@@ -24,7 +24,7 @@ use rayon::prelude::*;
 
 use crate::cache::CacheStore;
 use crate::cancel::CancellationToken;
-use crate::db::{IconVectorRow, Library};
+use crate::db::{IconVectorRow, Library, NewSheet};
 use crate::rss::{current_rss_bytes, RssWatcher};
 
 use super::background::BackgroundModel;
@@ -364,7 +364,13 @@ mod tests {
     }
 
     fn fixture() -> (CacheStore, SharedLibrary, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("isg-batch-test-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "isg-batch-test-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         (CacheStore::new(&dir), Mutex::new(Some(Library::open_in_memory().unwrap())), dir)
     }
 
@@ -374,6 +380,20 @@ mod tests {
     fn batch_vectorizes_groups_scores_and_persists() {
         let (cache, slot, dir) = fixture();
         let bytes = sheet_bytes();
+        {
+            let mut guard = lock_lib(&slot).unwrap();
+            guard
+                .as_mut()
+                .unwrap()
+                .insert_sheet(&NewSheet {
+                    id: [7; 16],
+                    source_path: "sheet.png".into(),
+                    content_hash: HASH.to_string(),
+                    width: 96,
+                    height: 48,
+                })
+                .unwrap();
+        }
         let summary = vectorize_sheet_batch(
             &bytes,
             &cache,

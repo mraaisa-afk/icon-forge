@@ -161,6 +161,19 @@ mod tests {
         }
     }
 
+    struct R24;
+    impl RasterView for R24 {
+        fn width(&self) -> u32 {
+            24
+        }
+        fn height(&self) -> u32 {
+            24
+        }
+        fn luma_row(&self, _y: u32) -> &[f32] {
+            &[]
+        }
+    }
+
     #[test]
     fn groups_disconnected_blocks_and_filters_noise() {
         let mut mask = ForegroundMask::new(32, 32);
@@ -222,7 +235,7 @@ mod tests {
                 mask.set(x, y, true); // flush left
             }
         }
-        let groups = CclGrouper { min_area: 1 }.group_all(&R, &mask);
+        let groups = CclGrouper { min_area: 1 }.group_all(&R24, &mask);
         assert_eq!(groups.len(), 2, "edge columns must not wrap around");
         assert_eq!(groups[0].bbox, Bbox::new(0, 10, 4, 4).unwrap());
         assert_eq!(groups[1].bbox, Bbox::new(20, 10, 4, 4).unwrap());
