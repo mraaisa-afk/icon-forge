@@ -44,8 +44,7 @@ pub fn vectorize_icon(
     let prof = profiles::profile(preset);
     let mut cfg = prof.vtracer_config();
     let mut palette = Vec::new();
-    let pixels;
-    if prof.colour {
+    let pixels = if prof.colour {
         let crop = sheet.crop_rgba(bbox);
         let qp = match prof.k {
             Some(k) => QuantizeParams::with_k_cap(k),
@@ -57,10 +56,10 @@ pub fn vectorize_icon(
             .iter()
             .map(|l| Color::new_rgba(l.rgba[0], l.rgba[1], l.rgba[2], l.rgba[3]))
             .collect();
-        pixels = compose(&layers, bbox.w, bbox.h, bg.rgba);
+        compose(&layers, bbox.w, bbox.h, bg.rgba)
     } else {
-        pixels = bw_crop(sheet, bbox, luma_of(bg.rgba), 32.0);
-    }
+        bw_crop(sheet, bbox, luma_of(bg.rgba), 32.0)
+    };
     let svg = svg_from(&cfg, pixels, bbox.w, bbox.h, prof.simplify)?;
     Ok(IconVectors { svg, palette })
 }

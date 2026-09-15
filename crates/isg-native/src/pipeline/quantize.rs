@@ -215,7 +215,7 @@ fn kmeans(samples: &[[i32; 3]], k: u32, iters: u32) -> (Vec<[i32; 3]>, Vec<u8>) 
     for _ in 0..iters {
         assign_points(samples, &centres, &mut assign);
         let mut moved = false;
-        for ci in 0..k {
+        for (ci, centre) in centres.iter_mut().enumerate().take(k) {
             let (mut sums, mut cnt) = ([0i64; 3], 0u64);
             for (s, &a) in samples.iter().zip(assign.iter()) {
                 if usize::from(a) == ci {
@@ -226,13 +226,13 @@ fn kmeans(samples: &[[i32; 3]], k: u32, iters: u32) -> (Vec<[i32; 3]>, Vec<u8>) 
                 }
             }
             for ch in 0..3 {
-                let old = centres[ci][ch];
+                let old = centre[ch];
                 let next = sums[ch]
                     .checked_div(cnt as i64)
                     .map(|v| v.clamp(0, 255) as i32)
                     .unwrap_or(old);
                 if next != old {
-                    centres[ci][ch] = next;
+                    centre[ch] = next;
                     moved = true;
                 }
             }

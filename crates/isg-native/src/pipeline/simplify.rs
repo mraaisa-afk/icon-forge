@@ -262,8 +262,8 @@ fn rdp_pass(pts: &[Point], pinned: &[bool], eps: f64, keep: &mut [bool]) {
         return;
     }
     let mut anchors = vec![0usize];
-    for i in 1..pts.len() - 1 {
-        if pinned[i] {
+    for (i, &pin) in pinned.iter().enumerate().take(pts.len() - 1).skip(1) {
+        if pin {
             anchors.push(i);
         }
     }
