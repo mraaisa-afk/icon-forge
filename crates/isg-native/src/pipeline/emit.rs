@@ -54,9 +54,9 @@ struct ScannedPath {
 /// `-` or alphanumeric (as in `stroke-width=` for `width=`) is rejected.
 fn extract_attr<'a>(attrs: &'a str, name: &str) -> Option<(&'a str, (usize, usize))> {
     let needle = format!("{name}=\"");
-    let start = attrs.find(&needle).filter(|&i| {
-        i == 0 || !attrs[..i].ends_with(|c: char| c.is_alphanumeric() || c == '-')
-    })?;
+    let start = attrs
+        .find(&needle)
+        .filter(|&i| i == 0 || !attrs[..i].ends_with(|c: char| c.is_alphanumeric() || c == '-'))?;
     let vstart = start + needle.len();
     let vend = attrs[vstart..].find('"')? + vstart;
     Some((&attrs[vstart..vend], (start, vend + 1)))
@@ -82,9 +82,15 @@ fn scan_paths(fragment: &str) -> Vec<ScannedPath> {
                 s.push_str(inner[..span.0].trim());
                 s.push(' ');
                 s.push_str(inner[span.1..].trim());
-                (d.to_string(), s.trim().trim_end_matches('/').trim().to_string())
+                (
+                    d.to_string(),
+                    s.trim().trim_end_matches('/').trim().to_string(),
+                )
             }
-            None => (String::new(), inner.trim_end_matches('/').trim().to_string()),
+            None => (
+                String::new(),
+                inner.trim_end_matches('/').trim().to_string(),
+            ),
         };
         out.push(ScannedPath { d, style });
         rest = &after[gt + 1..];
@@ -133,7 +139,9 @@ pub fn validate(doc: &str) -> Result<(), EmitError> {
         .map_err(|e| EmitError::Unparseable(e.to_string()))?;
     let size = tree.size();
     if size.width() <= 0.0 || size.height() <= 0.0 {
-        return Err(EmitError::Unparseable("document has non-positive size".to_string()));
+        return Err(EmitError::Unparseable(
+            "document has non-positive size".to_string(),
+        ));
     }
     Ok(())
 }
@@ -150,10 +158,14 @@ pub fn emit_svg(
     let body = merge_same_style(&v.svg)?;
     let mut doc = String::with_capacity(body.len() + 176);
     doc.push_str("<svg xmlns=\"http://www.w3.org/2000/svg\"");
-    doc.push_str(&format!(" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">"));
+    doc.push_str(&format!(
+        " width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">"
+    ));
     doc.push_str("<title>icon</title>");
     if stroke_only {
-        doc.push_str(&format!("<desc>Icon Forge preset={preset} stroke-only</desc>"));
+        doc.push_str(&format!(
+            "<desc>Icon Forge preset={preset} stroke-only</desc>"
+        ));
     } else {
         doc.push_str(&format!("<desc>Icon Forge preset={preset}</desc>"));
     }
@@ -185,7 +197,10 @@ mod tests {
     #[test]
     fn emits_valid_document_through_usvg_gate() {
         let doc = emit_svg(&vectors(SQUARE), 16, 16, "mono-clean", false).unwrap();
-        assert!(doc.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""), "{doc}");
+        assert!(
+            doc.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""),
+            "{doc}"
+        );
         assert!(doc.contains("viewBox=\"0 0 16 16\""));
         assert!(doc.contains("<title>icon</title>"));
         assert!(doc.contains("<desc>Icon Forge preset=mono-clean</desc>"));
@@ -199,7 +214,10 @@ mod tests {
         let frag = format!("{SQUARE}{SMALL}");
         let doc = emit_svg(&vectors(&frag), 16, 16, "mono-clean", false).unwrap();
         assert_eq!(doc.matches("<path").count(), 1, "{doc}");
-        assert!(doc.contains("d=\"M4,4L12,4L12,12L4,12Z M0,0L2,0L2,2Z\""), "{doc}");
+        assert!(
+            doc.contains("d=\"M4,4L12,4L12,12L4,12Z M0,0L2,0L2,2Z\""),
+            "{doc}"
+        );
     }
 
     #[test]

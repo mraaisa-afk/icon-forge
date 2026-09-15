@@ -162,7 +162,11 @@ pub fn score_svg(
     let sy = h as f32 / size.height();
     let mut pm = resvg::tiny_skia::Pixmap::new(w, h)
         .ok_or_else(|| ScoreError::Render("pixmap allocation failed".to_string()))?;
-    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(sx, sy), &mut pm.as_mut());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(sx, sy),
+        &mut pm.as_mut(),
+    );
     // Premultiplied RGBA bytes; the alpha byte is unaffected by the
     // premultiplication.
     let render_plane: Vec<u8> = pm.data().chunks_exact(4).map(|p| p[3]).collect();
@@ -336,9 +340,9 @@ fn compare_planes(reference: &[u8], render: &[u8], w: u32, h: u32) -> Score {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::background::BackgroundKind;
     use super::super::trace::IconVectors;
+    use super::*;
 
     const SQUARE: &str = "<path d=\"M4,4L12,4L12,12L4,12Z\" fill=\"#0a0a0a\"/>";
     const BG: [u8; 4] = [255, 255, 255, 255];
@@ -510,9 +514,13 @@ mod tests {
     #[test]
     fn payload_json_roundtrip_is_exact() {
         let sheet = sheet_16();
-        let icon =
-            vectorize_scored(&sheet, Bbox::new(4, 4, 8, 8).unwrap(), &bg(), TracePreset::Draft)
-                .unwrap();
+        let icon = vectorize_scored(
+            &sheet,
+            Bbox::new(4, 4, 8, 8).unwrap(),
+            &bg(),
+            TracePreset::Draft,
+        )
+        .unwrap();
         let bytes = serde_json::to_vec(&icon).unwrap();
         let back: ScoredIcon = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back, icon);
@@ -526,21 +534,23 @@ mod tests {
         let sheet = sheet_16();
         let bbox = Bbox::new(4, 4, 8, 8).unwrap();
 
-        let (first, hit) = cached_vectorize(
-            &store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1",
-        )
-        .unwrap();
+        let (first, hit) =
+            cached_vectorize(&store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1").unwrap();
         assert!(!hit, "first call is a miss");
-        let (second, hit) = cached_vectorize(
-            &store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1",
-        )
-        .unwrap();
+        let (second, hit) =
+            cached_vectorize(&store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1").unwrap();
         assert!(hit, "second call is a hit");
         assert_eq!(first, second);
 
         // A different preset (different doc name → different key) misses.
         let (_, hit) = cached_vectorize(
-            &store, &lib, &sheet, bbox, &bg(), TracePreset::Wireframe, "sp1",
+            &store,
+            &lib,
+            &sheet,
+            bbox,
+            &bg(),
+            TracePreset::Wireframe,
+            "sp1",
         )
         .unwrap();
         assert!(!hit, "other preset misses");
@@ -549,16 +559,12 @@ mod tests {
         let crop = sheet.crop_rgba(bbox);
         let key = CacheStore::cache_key(&crop, "mono-fast", "sp1", CACHE_VERSION);
         store.put(&lib, &key, b"{broken json").unwrap();
-        let (third, hit) = cached_vectorize(
-            &store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1",
-        )
-        .unwrap();
+        let (third, hit) =
+            cached_vectorize(&store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1").unwrap();
         assert!(!hit, "corrupt payload is a miss");
         assert_eq!(third, first);
-        let (fourth, hit) = cached_vectorize(
-            &store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1",
-        )
-        .unwrap();
+        let (fourth, hit) =
+            cached_vectorize(&store, &lib, &sheet, bbox, &bg(), TracePreset::Draft, "sp1").unwrap();
         assert!(hit, "repaired payload hits again");
         assert_eq!(fourth, first);
         let _ = std::fs::remove_dir_all(&dir);

@@ -24,12 +24,14 @@ use crate::IsgError;
 
 pub use background::{BackgroundKind, BackgroundModel, SegParams};
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
-pub use emit::{emit_svg, validate, CACHE_VERSION, EmitError};
+pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
 pub use normalize::normalize;
 pub use profiles::{profile, TraceProfile};
 pub use quantize::{Layer, QuantizeParams};
 pub use raster::SheetRaster;
-pub use score::{cached_vectorize, vectorize_scored, Score, ScoredIcon, ScoreError, VectorizeError};
+pub use score::{
+    cached_vectorize, vectorize_scored, Score, ScoreError, ScoredIcon, VectorizeError,
+};
 pub use simplify::SimplifyParams;
 pub use trace::{vectorize_icon, IconVectors};
 
