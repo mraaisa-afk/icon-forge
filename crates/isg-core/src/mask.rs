@@ -164,7 +164,7 @@ impl ForegroundMask {
             let mut x = row_start;
             while x < row_end {
                 // Bulk-skip fully-background words.
-                if x % 64 == 0 && self.bits[x >> 6] == 0 {
+                if x.is_multiple_of(64) && self.bits[x >> 6] == 0 {
                     x += 64;
                     continue;
                 }
