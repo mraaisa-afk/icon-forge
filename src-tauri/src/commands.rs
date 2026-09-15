@@ -357,7 +357,9 @@ pub fn vectorize_icon(
             message: "sheet not found".into(),
         })?;
     let store = CacheStore::new(cache_dir_for(lib.path()));
-    let bytes = std::fs::read(&row.source_path)?;
+    let bytes = std::fs::read(&row.source_path).map_err(|e| CmdError {
+        message: format!("read {}: {e}", row.source_path.display()),
+    })?;
     let seg_params = SegParams::default();
     let out = segment(&bytes, 4096, &seg_params)?;
     let (icon, cached) = cached_vectorize(

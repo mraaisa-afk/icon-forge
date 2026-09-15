@@ -444,6 +444,7 @@ impl Library {
         Ok(inserted)
     }
 
+    /// Number of sheets stored in the library.
     pub fn sheet_count(&self) -> crate::Result<u64> {
         let n: i64 = self
             .conn

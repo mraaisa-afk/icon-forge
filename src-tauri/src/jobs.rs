@@ -12,9 +12,8 @@ use isg_native::cache::CacheStore;
 use isg_native::db::Library;
 use isg_native::import::{import_folder, ImportOptions};
 use isg_native::jobs::{Job, JobContext, JobEngine, JobError, JobEvent, JobOutcome, Tier};
-use isg_native::pipeline::{
-    vectorize_sheet_batch, BatchError, BatchOptions, SheetRef, TracePreset,
-};
+use isg_core::TracePreset;
+use isg_native::pipeline::{vectorize_sheet_batch, BatchError, BatchOptions, SheetRef};
 
 /// Event name used for all job events (payload = [`JobEventDto`]).
 pub const JOB_EVENT: &str = "job://event";
@@ -151,7 +150,9 @@ impl Job for VectorizeSheetJob {
             let root = cache_dir_for(lib.path());
             (row.source_path, row.content_hash, root)
         };
-        let bytes = std::fs::read(&source_path)?;
+        let bytes = std::fs::read(&source_path).map_err(|e| {
+            JobError::Failed(format!("read {}: {e}", source_path.display()))
+        })?;
         let store = CacheStore::new(cache_root);
         let opts = BatchOptions {
             preset: self.preset,
