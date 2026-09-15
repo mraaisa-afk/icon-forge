@@ -28,8 +28,9 @@ impl SheetRaster {
             4 * width as usize * height as usize,
             "RGBA8 byte count mismatch"
         );
-        let luma: Vec<f32> = rgba
-            .chunks_exact(4)
+        let px_rows = rgba.as_chunks::<4>().0;
+        let luma: Vec<f32> = px_rows
+            .iter()
             .map(|px| {
                 0.299 * f32::from(px[0]) + 0.587 * f32::from(px[1]) + 0.114 * f32::from(px[2])
             })

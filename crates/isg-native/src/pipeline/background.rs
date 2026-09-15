@@ -86,9 +86,15 @@ pub fn detect_background(r: &SheetRaster, p: &SegParams) -> BackgroundModel {
 
 fn detect_alpha(r: &SheetRaster) -> Option<BackgroundModel> {
     let n = r.width() as u64 * r.height() as u64;
-    let transparent = r.rgba().chunks_exact(4).filter(|px| px[3] == 0).count() as u64;
+    let transparent = r
+        .rgba()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] == 0)
+        .count() as u64;
     let share = transparent as f32 / n as f32;
-    (share >= 0.10).then(|| BackgroundModel {
+    (share >= 0.10).then_some(BackgroundModel {
         kind: BackgroundKind::Alpha,
         rgba: [0, 0, 0, 0],
         consensus: share,
@@ -201,10 +207,18 @@ fn detect_kmeans_corners(r: &SheetRaster) -> Option<BackgroundModel> {
             }
         }
         if n0 > 0 {
-            c0 = [(s0[0] / n0) as u8, (s0[1] / n0) as u8, (s0[2] / n0) as u8];
+            c0 = [
+                s0[0].checked_div(n0).unwrap_or(0) as u8,
+                s0[1].checked_div(n0).unwrap_or(0) as u8,
+                s0[2].checked_div(n0).unwrap_or(0) as u8,
+            ];
         }
         if n1 > 0 {
-            c1 = [(s1[0] / n1) as u8, (s1[1] / n1) as u8, (s1[2] / n1) as u8];
+            c1 = [
+                s1[0].checked_div(n1).unwrap_or(0) as u8,
+                s1[1].checked_div(n1).unwrap_or(0) as u8,
+                s1[2].checked_div(n1).unwrap_or(0) as u8,
+            ];
         }
     }
     // Border ownership vote → background cluster.
@@ -375,7 +389,7 @@ fn lab_from_lut(r: u8, g: u8, b: u8, lut: &[f32; 256]) -> [f32; 3] {
     let (rl, gl, bl) = (lut[r as usize], lut[g as usize], lut[b as usize]);
     let x = (rl * 0.412_456_4 + gl * 0.357_576_1 + bl * 0.180_437_5) / 0.950_47;
     let y = rl * 0.212_672_9 + gl * 0.715_152_2 + bl * 0.072_175_0;
-    let z = (rl * 0.019_333_9 + gl * 0.119_192_0 + bl * 0.950_304_1) / 1.088_83;
+    let z = (rl * 0.019_333_9 + gl * 0.119_192 + bl * 0.950_304_1) / 1.088_83;
     let f = |t: f32| {
         if t > 216.0 / 24_389.0 {
             t.cbrt()

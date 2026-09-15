@@ -146,9 +146,7 @@ fn morph_row(p: &PackedRows, y: usize, dilate: bool) -> Vec<u64> {
         let oy = y as i64 + dy;
         if oy < 0 || oy >= i64::from(p.h) {
             if !dilate {
-                for v in &mut v {
-                    *v = 0;
-                }
+                v.fill(0);
             }
             continue;
         }
