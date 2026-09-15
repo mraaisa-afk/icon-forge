@@ -169,9 +169,11 @@ pub fn score_svg(
     );
     // Premultiplied RGBA bytes; the alpha byte is unaffected by the
     // premultiplication.
-    let render_plane: Vec<u8> = pm.data().chunks_exact(4).map(|p| p[3]).collect();
+    let render_plane: Vec<u8> = pm.data().as_chunks::<4>().0.iter().map(|p| p[3]).collect();
     let ref_plane: Vec<u8> = crop_rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| {
             p.iter()
                 .zip(bg_rgba.iter())
