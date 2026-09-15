@@ -224,7 +224,7 @@ fn kmeans(samples: &[[i32; 3]], k: u32, iters: u32) -> (Vec<[i32; 3]>, Vec<u8>) 
                 let old = centres[ci][ch];
                 let next = sums[ch]
                     .checked_div(cnt as i64)
-                    .map(|v| v.clamp(0, 255))
+                    .map(|v| v.clamp(0, 255) as i32)
                     .unwrap_or(old);
                 if next != old {
                     centres[ci][ch] = next;

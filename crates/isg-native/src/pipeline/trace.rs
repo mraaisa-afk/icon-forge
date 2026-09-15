@@ -9,9 +9,10 @@
 //! relative to the sheet background luma (polarity-independent), the same
 //! decision the Phase 0 spike validated.
 
-use isg_core::{BackgroundModel, Bbox, RasterView, TraceError, TracePreset};
+use isg_core::{Bbox, RasterView, TraceError, TracePreset};
 use vtracer::{Color, ColorImage, Config};
 
+use super::background::BackgroundModel;
 use super::profiles;
 use super::quantize::{self, Layer, QuantizeParams};
 use super::raster::SheetRaster;
