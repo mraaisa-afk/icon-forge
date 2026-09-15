@@ -406,7 +406,6 @@ mod tests {
         assert!(rows.iter().all(|r| r.ssim > 0.9));
         let ids: Vec<[u8; 16]> = rows.iter().map(|r| r.id).collect();
         assert_eq!(ids[0], icon_id(HASH, rows[0].bbox));
-        drop(lib);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

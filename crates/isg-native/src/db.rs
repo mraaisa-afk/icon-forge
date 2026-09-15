@@ -535,7 +535,7 @@ mod tests {
 
     fn vector_row(bbox: (u32, u32, u32, u32)) -> IconVectorRow {
         IconVectorRow {
-            id: [1; 16],
+            id: [bbox.0 as u8; 16],
             bbox,
             svg_key: format!("key-{}-{}", bbox.0, bbox.1),
             preset: "mono-fast".to_string(),

@@ -66,7 +66,7 @@ impl GroupingStrategy for CclGrouper {
         for y in 0..h {
             for x in 0..w {
                 let i = (y * w + x) as usize;
-                if !mask.get(i as u32, y as u32) {
+                if !mask.get(x as u32, y as u32) {
                     continue;
                 }
                 parent[i] = i as i32; // new set
@@ -81,7 +81,7 @@ impl GroupingStrategy for CclGrouper {
                         continue;
                     }
                     let ni = (ny * w + nx) as usize;
-                    if mask.get(ni as u32, ny as u32) && parent[ni] != -1 {
+                    if mask.get(nx as u32, ny as u32) && parent[ni] != -1 {
                         uf_union(&mut parent, i, ni);
                     }
                 }
@@ -95,7 +95,7 @@ impl GroupingStrategy for CclGrouper {
             let row = (y * w) as usize;
             for x in 0..w {
                 let i = row + x as usize;
-                if !mask.get(i as u32, y as u32) {
+                if !mask.get(x as u32, y as u32) {
                     continue;
                 }
                 let root = uf_find(&mut parent, i);
