@@ -23,11 +23,11 @@ use crate::IsgError;
 pub use background::{BackgroundKind, BackgroundModel, SegParams};
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
 pub use normalize::normalize;
-pub use profiles::{TraceProfile, profile};
+pub use profiles::{profile, TraceProfile};
 pub use quantize::{Layer, QuantizeParams};
 pub use raster::SheetRaster;
 pub use simplify::SimplifyParams;
-pub use trace::{IconVectors, vectorize_icon};
+pub use trace::{vectorize_icon, IconVectors};
 
 /// Result of the segmentation stages (①–③).
 #[derive(Clone, Debug)]

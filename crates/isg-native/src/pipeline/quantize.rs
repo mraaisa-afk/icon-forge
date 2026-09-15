@@ -97,7 +97,10 @@ pub fn quantize_crop(rgba: &[u8], w: u32, h: u32, p: &QuantizeParams) -> Vec<Lay
 
     // Elbow: run k-means for every k in 1..=k_cap and pick the knee of the
     // inertia curve (largest second difference, lowest k wins ties).
-    let k_cap = p.k_max.clamp(1, 32).min(samples.len().min(u32::MAX as usize) as u32);
+    let k_cap = p
+        .k_max
+        .clamp(1, 32)
+        .min(samples.len().min(u32::MAX as usize) as u32);
     let mut inertias = Vec::with_capacity(k_cap as usize);
     for k in 1..=k_cap {
         let (centres, assign) = kmeans(&samples, k, p.iters);
@@ -160,7 +163,9 @@ fn pick_elbow(inertias: &[f32]) -> u32 {
     if inertias.len() < 3 {
         return inertias.len() as u32;
     }
-    let drops: Vec<f32> = (0..inertias.len() - 1).map(|i| inertias[i] - inertias[i + 1]).collect();
+    let drops: Vec<f32> = (0..inertias.len() - 1)
+        .map(|i| inertias[i] - inertias[i + 1])
+        .collect();
     let mut best = 0.0f32;
     let mut best_i = 0usize;
     for i in 0..drops.len() - 1 {
@@ -321,7 +326,10 @@ mod tests {
         let rgba = blocks(
             16,
             16,
-            &[(0, 0, 8, 16, [255, 0, 0, 255]), (8, 0, 8, 16, [0, 0, 255, 255])],
+            &[
+                (0, 0, 8, 16, [255, 0, 0, 255]),
+                (8, 0, 8, 16, [0, 0, 255, 255]),
+            ],
         );
         let layers = quantize_crop(&rgba, 16, 16, &QuantizeParams::default());
         assert_eq!(layers.len(), 2, "red + blue");
@@ -354,7 +362,10 @@ mod tests {
         let rgba = blocks(
             16,
             16,
-            &[(0, 0, 8, 16, [255, 0, 0, 255]), (8, 0, 8, 16, [0, 0, 255, 255])],
+            &[
+                (0, 0, 8, 16, [255, 0, 0, 255]),
+                (8, 0, 8, 16, [0, 0, 255, 255]),
+            ],
         );
         let a = quantize_crop(&rgba, 16, 16, &QuantizeParams::default());
         let b = quantize_crop(&rgba, 16, 16, &QuantizeParams::default());

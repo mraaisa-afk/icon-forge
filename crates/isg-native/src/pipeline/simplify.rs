@@ -104,10 +104,7 @@ fn parse_subpaths(d: &str) -> Result<Vec<SubPath>, TraceError> {
             PathEl::QuadTo(q, p) => {
                 // Degree elevation: quad → cubic with 2/3 control points.
                 if let Some(s) = cur.as_mut() {
-                    let c1 = Point::new(
-                        pos.x + T * (q.x - pos.x),
-                        pos.y + T * (q.y - pos.y),
-                    );
+                    let c1 = Point::new(pos.x + T * (q.x - pos.x), pos.y + T * (q.y - pos.y));
                     let c2 = Point::new(p.x + T * (q.x - p.x), p.y + T * (q.y - p.y));
                     s.segs.push(Seg::Cubic { c1, c2, end: p });
                 }
@@ -504,7 +501,10 @@ mod tests {
             vis_area_px2: 1000.0,
             ..SimplifyParams::default()
         };
-        assert_eq!(simplify_d(d, &p).unwrap(), "M0.00,0.00 L10.00,0.00 L10.00,10.00Z");
+        assert_eq!(
+            simplify_d(d, &p).unwrap(),
+            "M0.00,0.00 L10.00,0.00 L10.00,10.00Z"
+        );
     }
 
     #[test]
@@ -526,7 +526,10 @@ mod tests {
             snap_px: 0.0,
             ..SimplifyParams::default()
         };
-        assert_eq!(simplify_d(d, &p).unwrap(), "M0.00,0.00 L10.00,0.00 L10.00,10.00Z");
+        assert_eq!(
+            simplify_d(d, &p).unwrap(),
+            "M0.00,0.00 L10.00,0.00 L10.00,10.00Z"
+        );
     }
 
     #[test]
@@ -547,7 +550,10 @@ mod tests {
             ..SimplifyParams::default()
         };
         // All passes disabled → geometry passes through; text is canonicalized.
-        assert_eq!(simplify_d(d, &p).unwrap(), "M2.00,3.00 L8.00,3.00 L8.00,9.00Z");
+        assert_eq!(
+            simplify_d(d, &p).unwrap(),
+            "M2.00,3.00 L8.00,3.00 L8.00,9.00Z"
+        );
     }
 
     #[test]
