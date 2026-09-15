@@ -12,7 +12,8 @@
 //! * [`import`] — streaming folder import (blake3-deduplicated, cancellable)
 //! * [`cache`] — content-addressed blake3/zstd payload cache (§3.3 stage 8)
 //! * [`pipeline`] — §3.3 auto-vectorization stages (normalize → background →
-//!   clean → quantize → trace → simplify → emit → score)
+//!   clean → grouping → quantize → trace → simplify → emit → score,
+//!   batched sheet-wide through the content-addressed cache)
 //! * [`project`] — atomic `.isgproj` save/open (kill-safe by construction)
 //! * [`jobs`] — T0/T1/T2 job engine with cancellation and preemption
 #![deny(unsafe_code)]
@@ -25,6 +26,9 @@ pub mod import;
 pub mod jobs;
 pub mod pipeline;
 pub mod project;
+pub mod rss;
+
+pub use rss::{current_rss_bytes, RssWatcher};
 
 /// Error type shared by the native glue modules.
 #[derive(Debug)]

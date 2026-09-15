@@ -204,6 +204,20 @@ pub fn vectorize_scored(
     })
 }
 
+/// Deterministic stage ⑧ cache key for one icon
+/// (`blake3(crop) ‖ preset ‖ segParams ‖ version`).
+#[must_use]
+pub fn vectorize_cache_key(
+    sheet: &SheetRaster,
+    bbox: Bbox,
+    preset: TracePreset,
+    seg_params: &str,
+) -> String {
+    let crop = sheet.crop_rgba(bbox);
+    let prof = profiles::profile(preset);
+    CacheStore::cache_key(&crop, prof.doc_name, seg_params, CACHE_VERSION)
+}
+
 /// `vectorize_scored` behind the stage ⑧ cache. Returns the icon and
 /// whether it was a cache hit. The payload is the [`ScoredIcon`] as JSON
 /// (zstd-compressed on disk); a corrupt payload is treated as a miss.
@@ -216,9 +230,7 @@ pub fn cached_vectorize(
     preset: TracePreset,
     seg_params: &str,
 ) -> Result<(ScoredIcon, bool), VectorizeError> {
-    let crop = sheet.crop_rgba(bbox);
-    let prof = profiles::profile(preset);
-    let key = CacheStore::cache_key(&crop, prof.doc_name, seg_params, CACHE_VERSION);
+    let key = vectorize_cache_key(sheet, bbox, preset, seg_params);
     if let Some(bytes) = store.get(lib, &key)? {
         if let Ok(icon) = serde_json::from_slice::<ScoredIcon>(&bytes) {
             return Ok((icon, true));

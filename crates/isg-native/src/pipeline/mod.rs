@@ -8,8 +8,10 @@
 //! vectorization cache (stage ⑧) sound.
 
 pub mod background;
+pub mod batch;
 pub mod clean;
 pub mod emit;
+pub mod group;
 pub mod normalize;
 pub mod profiles;
 pub mod quantize;
@@ -23,6 +25,10 @@ use isg_core::ForegroundMask;
 use crate::IsgError;
 
 pub use background::{BackgroundKind, BackgroundModel, SegParams};
+pub use batch::{
+    vectorize_sheet_batch, BatchError, BatchOptions, BatchSummary, SharedLibrary, SheetRef,
+};
+pub use group::CclGrouper;
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
 pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
 pub use normalize::normalize;

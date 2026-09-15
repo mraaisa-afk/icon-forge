@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 isg-core = { workspace = true }
+rayon = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 blake3 = "1"
 walkdir = "2"
@@ -20,3 +21,10 @@ resvg = { workspace = true }
 vtracer = { workspace = true }
 
 [dev-dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

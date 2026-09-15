@@ -62,6 +62,25 @@ pub struct NewIcon {
     pub svg_path: Option<String>,
 }
 
+/// One sheet's vectorized icon row (grouping bbox + stage ⑤–⑧ outcome).
+#[derive(Debug, Clone)]
+pub struct IconVectorRow {
+    /// 16-byte id (deterministic: blake3 of sheet content hash ‖ bbox).
+    pub id: [u8; 16],
+    /// Tight bbox `(x, y, w, h)` inside the sheet.
+    pub bbox: (u32, u32, u32, u32),
+    /// Stage ⑧ cache key (the SVG lives in the cache payload).
+    pub svg_key: String,
+    /// Preset doc name used for tracing.
+    pub preset: String,
+    /// Stage ⑧ MAE.
+    pub mae: f32,
+    /// Stage ⑧ SSIM.
+    pub ssim: f32,
+    /// Stage ⑧ IoU.
+    pub iou: f32,
+}
+
 /// A paged sheet row for the library grid.
 #[derive(Debug, Clone)]
 pub struct SheetRow {
@@ -343,6 +362,88 @@ impl Library {
     }
 
     /// Total sheet count (library header / pagination).
+    /// Fetches one sheet row by its 16-byte id.
+    pub fn sheet_by_id(&self, id: &[u8]) -> crate::Result<Option<SheetRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_path, content_hash, width, height, imported_at
+             FROM sheets WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        match rows.next()? {
+            None => Ok(None),
+            Some(r) => Ok(Some(SheetRow {
+                id: r.get(0)?,
+                source_path: r.get(1)?,
+                content_hash: r.get(2)?,
+                width: r.get(3)?,
+                height: r.get(4)?,
+                imported_at: r.get(5)?,
+            })),
+        }
+    }
+
+    /// Light rows for one sheet's icons (library grid + review lists).
+    pub fn icons_for_sheet(&self, sheet_id: &[u8]) -> crate::Result<Vec<IconVectorRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, bbox_x, bbox_y, bbox_w, bbox_h, svg_path, preset,
+                    quality_mae, quality_ssim, quality_iou
+             FROM icons WHERE sheet_id = ?1 ORDER BY bbox_y, bbox_x",
+        )?;
+        let mut out = Vec::new();
+        let mut rows = stmt.query(rusqlite::params![sheet_id])?;
+        while let Some(r) = rows.next()? {
+            let id: Vec<u8> = r.get(0)?;
+            let mut id_arr = [0u8; 16];
+            id_arr.copy_from_slice(&id[..16]);
+            out.push(IconVectorRow {
+                id: id_arr,
+                bbox: (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
+                svg_key: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                preset: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                mae: r.get::<_, Option<f32>>(7)?.unwrap_or(0.0),
+                ssim: r.get::<_, Option<f32>>(8)?.unwrap_or(0.0),
+                iou: r.get::<_, Option<f32>>(9)?.unwrap_or(0.0),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Replaces one sheet's icon rows with `rows` (deterministic grouping
+    /// makes the set stable, so delete+insert is idempotent). One
+    /// transaction; `review_state` resets to `pending` for fresh rows.
+    pub fn replace_sheet_icons(
+        &mut self,
+        sheet_id: &[u8],
+        rows: &[IconVectorRow],
+    ) -> crate::Result<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM icons WHERE sheet_id = ?1", rusqlite::params![sheet_id])?;
+        let mut inserted = 0usize;
+        for r in rows {
+            tx.execute(
+                "INSERT INTO icons (id, sheet_id, bbox_x, bbox_y, bbox_w, bbox_h,
+                                    svg_path, preset, quality_mae, quality_ssim, quality_iou)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    &r.id[..],
+                    sheet_id,
+                    r.bbox.0,
+                    r.bbox.1,
+                    r.bbox.2,
+                    r.bbox.3,
+                    if r.svg_key.is_empty() { None } else { Some(&r.svg_key) },
+                    if r.preset.is_empty() { None } else { Some(&r.preset) },
+                    r.mae,
+                    r.ssim,
+                    r.iou,
+                ],
+            )?;
+            inserted += 1;
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
     pub fn sheet_count(&self) -> crate::Result<u64> {
         let n: i64 = self
             .conn
@@ -414,5 +515,64 @@ impl Library {
     #[cfg(test)]
     pub(crate) fn test_conn(&self) -> &Connection {
         &self.conn
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sheet_row() -> NewSheet {
+        NewSheet {
+            id: [9; 16],
+            source_path: "C:\\sheets\\a.png".to_string(),
+            content_hash: "cafe1234".to_string(),
+            width: 96,
+            height: 48,
+        }
+    }
+
+    fn vector_row(bbox: (u32, u32, u32, u32)) -> IconVectorRow {
+        IconVectorRow {
+            id: [1; 16],
+            bbox,
+            svg_key: format!("key-{}-{}", bbox.0, bbox.1),
+            preset: "mono-fast".to_string(),
+            mae: 0.01,
+            ssim: 0.99,
+            iou: 0.98,
+        }
+    }
+
+    #[test]
+    fn sheet_lookup_and_icon_replace_roundtrip() {
+        let mut lib = Library::open_in_memory().unwrap();
+        assert_eq!(
+            lib.insert_sheet(&sheet_row()).unwrap(),
+            InsertOutcome::Inserted
+        );
+        let found = lib.sheet_by_id(&[9; 16]).unwrap().expect("row exists");
+        assert_eq!(found.content_hash, "cafe1234");
+        assert_eq!(found.width, 96);
+        assert!(lib.sheet_by_id(&[8; 16]).unwrap().is_none());
+
+        let rows = vec![
+            vector_row((8, 8, 16, 16)),
+            vector_row((56, 24, 16, 16)),
+        ];
+        assert_eq!(lib.replace_sheet_icons(&[9; 16], &rows).unwrap(), 2);
+        assert_eq!(lib.icon_count().unwrap(), 2);
+
+        let back = lib.icons_for_sheet(&[9; 16]).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].bbox, (8, 8, 16, 16));
+        assert_eq!(back[0].svg_key, "key-8-8");
+        assert_eq!(back[0].preset, "mono-fast");
+        assert!(back[0].ssim > 0.98);
+
+        // Replacing the same sheet's icons is idempotent.
+        assert_eq!(lib.replace_sheet_icons(&[9; 16], &rows).unwrap(), 2);
+        assert_eq!(lib.icon_count().unwrap(), 2);
+        assert!(lib.icons_for_sheet(&[1; 16]).unwrap().is_empty());
     }
 }

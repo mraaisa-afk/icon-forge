@@ -8,9 +8,13 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+use isg_native::cache::CacheStore;
 use isg_native::db::Library;
 use isg_native::import::{import_folder, ImportOptions};
 use isg_native::jobs::{Job, JobContext, JobEngine, JobError, JobEvent, JobOutcome, Tier};
+use isg_native::pipeline::{
+    vectorize_sheet_batch, BatchError, BatchOptions, SheetRef, TracePreset,
+};
 
 /// Event name used for all job events (payload = [`JobEventDto`]).
 pub const JOB_EVENT: &str = "job://event";
@@ -101,6 +105,80 @@ pub struct ImportJob {
     pub root: PathBuf,
     /// Shared with [`crate::state::App::library`].
     pub library_slot: Arc<Mutex<Option<Library>>>,
+}
+
+/// Cache directory for a project: `vector-cache` next to the project file
+/// (temp dir fallback for in-memory libraries — tests only).
+#[must_use]
+pub fn cache_dir_for(db_path: Option<&std::path::Path>) -> PathBuf {
+    match db_path.and_then(std::path::Path::parent) {
+        Some(dir) => dir.join("vector-cache"),
+        None => std::env::temp_dir().join("icon-forge-vector-cache"),
+    }
+}
+
+/// T2 bulk vectorization of one stored sheet through stages ①–⑧.
+pub struct VectorizeSheetJob {
+    /// Sheet to vectorize (id as stored in the library).
+    pub sheet_id: [u8; 16],
+    /// Trace preset for every icon on the sheet.
+    pub preset: TracePreset,
+    /// Shared with [`crate::state::App::library`].
+    pub library_slot: Arc<Mutex<Option<Library>>>,
+}
+
+impl Job for VectorizeSheetJob {
+    fn name(&self) -> &str {
+        "Vectorize sheet"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Batch
+    }
+
+    fn run(&self, ctx: &JobContext) -> Result<String, JobError> {
+        let (source_path, content_hash, cache_root) = {
+            let guard = self
+                .library_slot
+                .lock()
+                .map_err(|_| JobError::Failed("library mutex poisoned".into()))?;
+            let lib = guard
+                .as_ref()
+                .ok_or_else(|| JobError::Failed("no project is open".into()))?;
+            let row = lib
+                .sheet_by_id(&self.sheet_id)?
+                .ok_or_else(|| JobError::Failed("sheet not found".into()))?;
+            let root = cache_dir_for(lib.path());
+            (row.source_path, row.content_hash, root)
+        };
+        let bytes = std::fs::read(&source_path)?;
+        let store = CacheStore::new(cache_root);
+        let opts = BatchOptions {
+            preset: self.preset,
+            ..BatchOptions::default()
+        };
+        let summary = vectorize_sheet_batch(
+            &bytes,
+            &store,
+            &self.library_slot,
+            Some(SheetRef {
+                id: self.sheet_id,
+                content_hash,
+            }),
+            &opts,
+            ctx.token(),
+            &|done, total| ctx.progress(done, total, "vectorizing"),
+        )
+        .map_err(|e| match e {
+            BatchError::Cancelled => JobError::Cancelled,
+            other => JobError::Failed(other.to_string()),
+        })?;
+        let peak_mb = summary.peak_rss_bytes as f64 / (1024.0 * 1024.0);
+        Ok(format!(
+            "vectorized {} icons · {} cached · {} failed · peak RSS {peak_mb:.0} MB",
+            summary.ok, summary.cache_hits, summary.failed
+        ))
+    }
 }
 
 impl Job for ImportJob {
