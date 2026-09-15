@@ -6,6 +6,8 @@
 //! from a small side thread so long batch jobs record their *peak*
 //! without instrumenting every loop body.
 
+use std::sync::Arc;
+
 /// Resident set size of this process in bytes, or `None` when the
 /// platform has no supported source (never the case on Windows/Linux).
 #[must_use]
@@ -112,7 +114,6 @@ impl Drop for RssWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn current_rss_is_reported_on_supported_platforms() {
