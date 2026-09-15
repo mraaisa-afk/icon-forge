@@ -94,6 +94,19 @@ impl SheetRaster {
         }
         out
     }
+
+    /// Encodes [`Self::crop_rgba`] as a lossless PNG — the comparator's
+    /// A-side, pixel-identical to what stage ⑧ scored.
+    #[must_use]
+    pub fn crop_png(&self, bbox: Bbox) -> Vec<u8> {
+        let rgba = self.crop_rgba(bbox);
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, bbox.w, bbox.h, image::ExtendedColorType::Rgba8)
+            // In-memory sink: the encoder cannot fail on a Vec target.
+            .expect("png encode into Vec is infallible");
+        png
+    }
 }
 
 impl RasterView for SheetRaster {

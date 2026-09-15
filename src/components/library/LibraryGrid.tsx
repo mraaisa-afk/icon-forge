@@ -20,6 +20,7 @@ export function LibraryGrid() {
   const totalCount = useStore((s) => s.totalCount);
   const project = useStore((s) => s.project);
   const refreshPage = useStore((s) => s.refreshPage);
+  const openSheet = useStore((s) => s.openSheet);
   const [scrollTop, setScrollTop] = useState(0);
   const [height, setHeight] = useState(600);
   const scroller = useRef<HTMLDivElement>(null);
@@ -81,12 +82,14 @@ export function LibraryGrid() {
           }}
         >
           {visible.map((sheet) => (
-            <div
+            <button
               key={sheet.id}
+              type="button"
               data-testid="library-cell"
-              className="m-[5px] flex flex-col items-center justify-center rounded border border-forge-edge bg-forge-panel p-2"
+              className="m-[5px] flex cursor-pointer flex-col items-center justify-center rounded border border-forge-edge bg-forge-panel p-2 hover:border-forge-accent"
               style={{ height: CELL }}
               title={sheet.sourcePath}
+              onClick={() => void openSheet(sheet)}
             >
               <div className="text-[10px] text-forge-dim">{shortHash(sheet.contentHash)}</div>
               <div className="mt-1 truncate text-xs text-forge-text">
@@ -95,7 +98,7 @@ export function LibraryGrid() {
               <div className="text-[10px] text-forge-dim">
                 {sheet.width}×{sheet.height}
               </div>
-            </div>
+            </button>
           ))}
         </div>
       </div>

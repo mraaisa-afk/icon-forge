@@ -9,7 +9,7 @@ use tauri::{Builder, State};
 
 use isg_core::{Bbox, TracePreset};
 use isg_native::cache::CacheStore;
-use isg_native::db::Library;
+use isg_native::db::{IconVectorRow, Library};
 use isg_native::jobs::{JobEngine, JobId};
 use isg_native::pipeline::{cached_vectorize, segment, SegParams, VectorizeError};
 
@@ -268,6 +268,40 @@ pub struct ScoreDto {
     pub composite: f32,
 }
 
+/// A stored icon row (comparator grid / review list).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IconDto {
+    /// 32-char hex of the 16-byte icon id.
+    pub id: String,
+    /// Tight bbox `(x, y, w, h)` inside the sheet.
+    pub bbox: (u32, u32, u32, u32),
+    /// Stage ⑧ cache key (empty when the payload is not cached).
+    pub svg_key: String,
+    /// §3.3-⑤ preset doc name.
+    pub preset: String,
+    /// Mean absolute ink-plane error.
+    pub mae: f32,
+    /// Block SSIM (8×8 windows).
+    pub ssim: f32,
+    /// Ink IoU (alpha ≥ 128).
+    pub iou: f32,
+}
+
+impl From<&IconVectorRow> for IconDto {
+    fn from(r: &IconVectorRow) -> Self {
+        IconDto {
+            id: r.id.iter().map(|b| format!("{b:02x}")).collect(),
+            bbox: r.bbox,
+            svg_key: r.svg_key.clone(),
+            preset: r.preset.clone(),
+            mae: r.mae,
+            ssim: r.ssim,
+            iou: r.iou,
+        }
+    }
+}
+
 /// A single icon's final SVG + score (review preview / W5 comparator).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -281,6 +315,7 @@ pub struct IconSvgDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VectorizeSheetRequest {
     /// Hex-encoded 16-byte sheet id.
     pub sheet_id: String,
@@ -379,6 +414,57 @@ pub fn vectorize_icon(
     })
 }
 
+/// Lists the vectorized icons stored for one sheet (comparator grid).
+#[tauri::command]
+pub fn sheet_icons(state: State<'_, App>, sheet_id: String) -> CmdResult<Vec<IconDto>> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let guard = state.lock()?;
+    let Some(lib) = guard.as_ref() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let rows = lib.icons_for_sheet(&id)?;
+    Ok(rows.iter().map(IconDto::from).collect())
+}
+
+/// Base64 PNG of one icon's crop from the normalized sheet — the exact
+/// pixels stage ⑧ scored (comparator A-side).
+#[tauri::command]
+pub fn sheet_crop(
+    state: State<'_, App>,
+    sheet_id: String,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> CmdResult<String> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let bbox = Bbox::new(x, y, w, h).ok_or_else(|| CmdError {
+        message: "empty or invalid bbox".into(),
+    })?;
+    let guard = state.lock()?;
+    let Some(lib) = guard.as_ref() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let row = lib.sheet_by_id(&id)?.ok_or_else(|| CmdError {
+        message: "sheet not found".into(),
+    })?;
+    let bytes = std::fs::read(&row.source_path).map_err(|e| CmdError {
+        message: format!("read {}: {e}", row.source_path),
+    })?;
+    let out = segment(&bytes, 4096, &SegParams::default())?;
+    let png = out.sheet.crop_png(bbox);
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png))
+}
+
 /// Registers all commands on the builder.
 pub fn register(builder: Builder<tauri::Wry>) -> Builder<tauri::Wry> {
     builder.invoke_handler(tauri::generate_handler![
@@ -392,5 +478,7 @@ pub fn register(builder: Builder<tauri::Wry>) -> Builder<tauri::Wry> {
         library_stats,
         vectorize_sheet_submit,
         vectorize_icon,
+        sheet_icons,
+        sheet_crop,
     ])
 }

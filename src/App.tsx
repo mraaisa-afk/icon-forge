@@ -2,10 +2,12 @@ import { useEffect } from "react";
 import { Toolbar } from "./components/Toolbar";
 import { JobBar } from "./components/JobBar";
 import { LibraryGrid } from "./components/library/LibraryGrid";
+import { SheetPanel } from "./components/sheet/SheetPanel";
 import { useStore } from "./state/store";
 
 export function App() {
   const project = useStore((s) => s.project);
+  const selectedSheet = useStore((s) => s.selectedSheet);
   const startEventPump = useStore((s) => s.startEventPump);
 
   useEffect(() => {
@@ -15,9 +17,14 @@ export function App() {
   return (
     <div className="flex h-full flex-col">
       <Toolbar />
-      <div className="min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1">
         {project ? (
-          <LibraryGrid />
+          <>
+            <div className="min-h-0 flex-1">
+              <LibraryGrid />
+            </div>
+            {selectedSheet && <SheetPanel />}
+          </>
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-forge-dim">
             <div className="text-4xl">⚒</div>

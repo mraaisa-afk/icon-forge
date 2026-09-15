@@ -21,5 +21,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = "0.22"
 isg-core = { workspace = true }
 isg-native = { path = "../crates/isg-native" }
