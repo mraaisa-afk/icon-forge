@@ -14,7 +14,6 @@
 //! next save) and never touched by open.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
