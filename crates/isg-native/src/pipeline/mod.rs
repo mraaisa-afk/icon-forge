@@ -1,7 +1,7 @@
 //! §3.3 auto-vectorization pipeline — segmentation (stages ①–③), colour
-//! quantization (④), preset-profiled vtracer tracing (⑤) and the custom
-//! geometry simplify pass (⑥). Emit+validate (⑦) and score+cache (⑧) land
-//! in W3; batch orchestration in W4.
+//! quantization (④), preset-profiled vtracer tracing (⑤), the custom
+//! geometry simplify pass (⑥), emit + usvg validation (⑦) and scoring +
+//! content-addressed caching (⑧). Batch orchestration lands in W4.
 //!
 //! Every stage is byte-deterministic: same input bytes + same
 //! [`SegParams`]/preset → identical output, which is what makes the
@@ -9,10 +9,12 @@
 
 pub mod background;
 pub mod clean;
+pub mod emit;
 pub mod normalize;
 pub mod profiles;
 pub mod quantize;
 pub mod raster;
+pub mod score;
 pub mod simplify;
 pub mod trace;
 
@@ -22,10 +24,12 @@ use crate::IsgError;
 
 pub use background::{BackgroundKind, BackgroundModel, SegParams};
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
+pub use emit::{emit_svg, validate, CACHE_VERSION, EmitError};
 pub use normalize::normalize;
 pub use profiles::{profile, TraceProfile};
 pub use quantize::{Layer, QuantizeParams};
 pub use raster::SheetRaster;
+pub use score::{cached_vectorize, vectorize_scored, Score, ScoredIcon, ScoreError, VectorizeError};
 pub use simplify::SimplifyParams;
 pub use trace::{vectorize_icon, IconVectors};
 

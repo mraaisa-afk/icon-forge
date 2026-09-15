@@ -31,7 +31,7 @@ pub struct TraceProfile {
     pub slider: u8,
     /// Colour mode (stage ④ quantize feeds the palette) vs binary.
     pub colour: bool,
-    /// Outline-only intent (Wireframe); honoured by the W3 emit stage.
+    /// Outline-only intent (Wireframe); recorded in the emitted `<desc>`.
     pub stroke_only: bool,
     /// Stage ④ palette target `k_max` (colour presets only).
     pub k: Option<u32>,

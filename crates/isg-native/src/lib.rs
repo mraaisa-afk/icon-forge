@@ -12,7 +12,7 @@
 //! * [`import`] — streaming folder import (blake3-deduplicated, cancellable)
 //! * [`cache`] — content-addressed blake3/zstd payload cache (§3.3 stage 8)
 //! * [`pipeline`] — §3.3 auto-vectorization stages (normalize → background →
-//!   clean → quantize → trace → simplify; emit/score land in W3)
+//!   clean → quantize → trace → simplify → emit → score)
 //! * [`project`] — atomic `.isgproj` save/open (kill-safe by construction)
 //! * [`jobs`] — T0/T1/T2 job engine with cancellation and preemption
 #![deny(unsafe_code)]
