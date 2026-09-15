@@ -153,8 +153,8 @@ mod tests {
     use super::*;
     use crate::db::{NewIcon, NewSheet, ReviewState};
 
-    fn seed(lib: &mut Library, n: u32) {
-        for i in 0..n {
+    fn seed(lib: &mut Library, from: u32, n: u32) {
+        for i in from..from + n {
             let mut id = [0u8; 16];
             id[..4].copy_from_slice(&i.to_le_bytes());
             lib.insert_sheet(&NewSheet {
@@ -174,7 +174,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("p.isgproj");
         let mut lib = Library::open(&path).unwrap();
-        seed(&mut lib, 10);
+        seed(&mut lib, 0, 10);
         lib.save_in_place().unwrap();
         assert_eq!(lib.sheet_count().unwrap(), 10, "still usable after save");
         assert_eq!(lib.path(), Some(path.as_path()));
@@ -201,7 +201,7 @@ mod tests {
         let src = dir.join("a.isgproj");
         let dest = dir.join("sub").join("b.isgproj");
         let mut lib = Library::open(&src).unwrap();
-        seed(&mut lib, 3);
+        seed(&mut lib, 0, 3);
         lib.save_as(&dest).unwrap();
 
         {
@@ -211,7 +211,7 @@ mod tests {
         } // drop the snapshot handle: overwriting a file another connection
         // still holds open is denied on Windows.
         // Save-as snapshot excludes rows inserted afterwards.
-        seed(&mut lib, 2);
+        seed(&mut lib, 3, 2);
         lib.save_as(&dest).unwrap();
         let snap2 = Library::open(&dest).unwrap();
         assert_eq!(snap2.sheet_count().unwrap(), 5);
