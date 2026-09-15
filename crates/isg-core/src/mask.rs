@@ -323,8 +323,14 @@ mod tests {
             }, // clamped to width
         ];
         let m = ForegroundMask::from_runs(20, 2, &runs);
-        assert_eq!(m.ink_count(), 40 + 6);
+        // Run 1 clamps 10..50 -> 10 px on row 0; run 3 clamps 14..90 -> 6 px
+        // on row 1; run 2 (y = 9 >= height) is skipped entirely.
+        assert_eq!(m.ink_count(), 10 + 6);
+        assert!(!m.get(9, 0)); // x_start boundary respected
+        assert!(m.get(10, 0));
+        assert!(m.get(19, 0)); // x_end clamped to width
         assert!(m.get(19, 1));
-        assert!(!m.get(0, 9));
+        assert!(!m.get(0, 0)); // the skipped y=9 run did not land on row 0
+        assert!(!m.get(0, 1)); // run 3 starts at x = 14, not 0
     }
 }

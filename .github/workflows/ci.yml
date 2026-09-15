@@ -64,7 +64,7 @@ jobs:
         run: cargo check --workspace --release
 
       - name: Tests (release) — Phase 0 gate + Phase 1 exit-criteria tests
-        run: cargo test --workspace --release
+        run: cargo test --workspace --release --no-fail-fast
 
       - name: Corpus regeneration consistency (truth JSONs must be byte-identical)
         shell: bash
