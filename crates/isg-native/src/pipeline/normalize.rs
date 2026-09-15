@@ -138,7 +138,7 @@ mod tests {
     fn png_bytes(w: u32, h: u32, px: &[u8]) -> Vec<u8> {
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(px, ExtendedColorType::Rgba8, w, h)
+            .write_image(px, w, h, ExtendedColorType::Rgba8)
             .expect("png encode");
         png
     }

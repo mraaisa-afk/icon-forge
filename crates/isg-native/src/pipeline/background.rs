@@ -483,7 +483,7 @@ mod tests {
     fn jpeg_style_noise_still_reaches_consensus_via_delta_e() {
         // Background ~250 with ±6 RGB noise (ΔE ≪ 12), icon at 60 (ΔE ≫ 12).
         // Range stays within 244..=255 so no u8 wrap can plant black px.
-        let (w, h) = (96, 96);
+        let (w, h) = (96u32, 96u32);
         let mut rgba = Vec::new();
         for y in 0..h {
             for x in 0..w {
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn weak_consensus_falls_back_to_corner_kmeans() {
         // 50/50 two-tone: no border majority → corner-seeded k-means.
-        let (w, h) = (64, 64);
+        let (w, h) = (64u32, 64u32);
         let mut rgba = Vec::new();
         for y in 0..h {
             for x in 0..w {

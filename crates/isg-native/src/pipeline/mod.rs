@@ -53,19 +53,19 @@ mod tests {
     /// gray speckles — encoded as PNG bytes via the `image` dev encoder.
     fn sheet_bytes() -> Vec<u8> {
         let mut rgba = vec![255u8; 64 * 64 * 4];
-        for y in 20..40 {
-            for x in 20..40 {
+        for y in 20usize..40 {
+            for x in 20usize..40 {
                 let i = (y * 64 + x) * 4;
                 rgba[i..i + 3].copy_from_slice(&[10, 10, 10]);
             }
         }
-        for &(x, y) in &[(5u32, 5u32), (50u32, 60u32)] {
+        for &(x, y) in &[(5usize, 5usize), (50usize, 60usize)] {
             let i = (y * 64 + x) * 4;
             rgba[i..i + 3].copy_from_slice(&[128, 128, 128]);
         }
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(&rgba, ExtendedColorType::Rgba8, 64, 64)
+            .write_image(&rgba, 64, 64, ExtendedColorType::Rgba8)
             .expect("png encode");
         png
     }
