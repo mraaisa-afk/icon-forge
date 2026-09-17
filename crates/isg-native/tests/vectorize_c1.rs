@@ -70,6 +70,7 @@ fn open_project(dir: &Path, truth: &Truth, hash_hex: &str) -> (CacheStore, Share
             height: truth.height,
         })
         .unwrap();
+    drop(guard);
     (cache, slot)
 }
 
