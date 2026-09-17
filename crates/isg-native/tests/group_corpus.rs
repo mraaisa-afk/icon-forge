@@ -138,6 +138,7 @@ const PNG_SHEETS: [&str; 15] = [
     "12_c2_latency_grid",
     "14_c8_colour_icons",
     "15_c9_duplicates",
+    "16_c10_noisy_scan",
 ];
 
 #[test]
