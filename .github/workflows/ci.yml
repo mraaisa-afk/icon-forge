@@ -66,7 +66,13 @@ jobs:
       - name: Tests (release) — Phase 0 gate + Phase 1 exit-criteria tests
         # --nocapture: the exit-gate tests eprintln their measured
         # numbers as evidence; libtest hides passing tests' output.
-        run: cargo test --workspace --release --no-fail-fast -- --nocapture
+        # --no-fail-fast is permanent: a failing test must not hide the other
+        # gates' evidence. `tee` keeps the log AND feeds the job summary
+        # below; `pipefail` preserves the test exit status through the pipe.
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --release --no-fail-fast -- --nocapture 2>&1 | tee target/test-evidence.txt
 
       - name: Corpus regeneration consistency (truth JSONs must be byte-identical)
         shell: bash
@@ -79,7 +85,30 @@ jobs:
           exit $status
 
       - name: Spike benchmark — Phase 0 exit gate (exact counts, C2 keystone <= 2.0 s; JSON report in logs)
-        run: cargo run -p isg-spike-groupall --release -- --corpus bench/corpus --json
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo run -p isg-spike-groupall --release -- --corpus bench/corpus --json 2>&1 | tee target/spike-evidence.json
+
+      # The raw log download lives on *.blob.core.windows.net, which some
+      # network-isolated review sandboxes cannot reach (TLS reset at the
+      # egress proxy). The job summary is served through the GitHub API
+      # instead, so the run's own evidence numbers stay reviewable from
+      # anywhere: gh api .../commits/<sha>/check-runs --jq '.check_runs[].output.summary'
+      - name: Evidence → job summary (API-readable)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Evidence (run-produced)"
+            echo '```text'
+            grep -hE 'evidence|W[0-9]+ |C[0-9]+ |SSIM|MAE|IoU|composite|peak RSS|keystone|groups|ms' \
+              target/test-evidence.txt 2>/dev/null | head -120 || true
+            echo '```'
+            echo '```json'
+            tail -c 3000 target/spike-evidence.json 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
         run: cargo check --target wasm32-unknown-unknown -p isg-core

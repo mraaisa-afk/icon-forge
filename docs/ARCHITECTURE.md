@@ -160,11 +160,20 @@ Design against five failure modes, in this order.
 2. **refuse if merged aspect > 4.0**
 3. **refuse if merged height > 1.9 × median_h**
 4. IoU > 0.25 or containment → merge
-5. within 0.5×GAP and height ratio ∈ [0.6, 1.6] → merge
+5. within 0.5×GAP, height ratio ∈ [0.6, 1.6], **and combined area ≤ 1.75 × median_area** → merge
 
 Max 3 iterations. Rules 2 and 3 exist specifically to stop the classic cascade that glues a whole row into one blob.
 
-**F2 Over-merge — split.** Only for components whose bbox exceeds `(2.2 × median_h)²`: distance transform → non-max-suppressed local maxima as seeds (radius 0.6 × median_h) → **Meyer's marker-controlled watershed** with a binary heap → reject slivers under 10% of expected. Two deterministic fallbacks if seeding disagrees with the bbox aspect.
+Rule 5's area guard exists because rules 2 and 3 alone do not stop that cascade once the pieces are small: without it, a row of equal-sized icons with 4 px gaps glues into one blob (each pair passes the gap and height-ratio tests while the merged box stays under the aspect and height ceilings) and no exact-count gate can survive it. With it, `merge_refuses_two_full_size_icons_at_a_four_pixel_gap` holds 12 → 12 while body + fragment still merges (`merge_joins_a_small_fragment_within_gap`). Both tests are the evidence anchor for this rule.
+
+**F2 Over-merge — split.** Only for components whose bbox area exceeds `(2.2 × median_h)²`: chamfer distance transform → non-max-suppressed local maxima as seeds (radius 0.6 × median_h, peaks at least `0.3 × median_h` from background) → **Meyer's marker-controlled watershed** with a binary heap → reject slivers under 10% of expected, reattaching each sliver to the adjacent region with the longest shared boundary (ties → lowest label). Two deterministic fallbacks when seeding disagrees with the bbox aspect:
+
+* **under-seeded** (fewer than 2 peaks while the bbox holds ≥ 2 median-sized icons) → cut the component into `clamp(round(bbox_area / median_h²), 2, max_seeds)` bands at the lowest-ink profile positions of the long axis (ties → lowest coordinate, minimum band width 2 px);
+* **over-seeded** (more peaks than `round(bbox_area / median_h²)`, the count of median-sized icons that fit in the bbox) → keep the strongest peaks by (peak distance desc, scan index asc) and re-run the watershed.
+
+Both fallbacks compare seeding against the same quantity — how many `median_h`-sized cells fit in the component's bbox — because that is the only count that stays meaningful for 2-D glue (a row *and* a grid), which the long-axis count alone does not.
+
+A component whose inscribed radius (`dt_max`) exceeds `0.75 × median_h` is **never** split: it is one large icon, not a merge, and this guard is what keeps a legitimately solid large icon out of the splitter. Determinism is by construction — every ordering (seed peaks, heap pops, sliver reattachment, band cuts) breaks ties on scan index — and a split stands only when ≥ 2 regions survive sliver rejection. Evidence anchors: `split_candidates_are_size_gated`, `splits_a_glued_grid_into_cells`, `slivers_are_reattached_to_the_longest_border`, `under_seeding_falls_back_to_profile_cuts`, `over_seeding_falls_back_to_reseeding`, `fat_component_is_never_split`.
 
 **F3 Holes.** Sort by area DESC, sweep an interval tree on x-ranges, build the containment forest. **Even-odd depth parity: depth 0 = body, depth 1 = hole.** A ring or the letter "O" is one icon, not two. Holes attach as `evenodd` subpaths at trace time.
 
