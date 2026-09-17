@@ -168,6 +168,9 @@ fn the_sheets_that_needed_work_score_below_one() {
     let (_b, _mask, _groups, stats, _t) = group_sheet("09_near_touching", &params);
     let near = stats.confidence.clone();
     assert_eq!(stats.grid.restored, 3, "three provenance restorations");
+    // Captured before the later sheets shadow `stats` — the evidence line below
+    // must report this sheet's own restoration count.
+    let near_restored = stats.grid.restored;
     assert_eq!(near.review_groups, 6, "{near:?}");
     assert!(
         near.warnings
@@ -202,7 +205,7 @@ fn the_sheets_that_needed_work_score_below_one() {
 
     eprintln!(
         "evidence: W11 deductions 09_near_touching score={:.3} review={} restored={} | 07_size_range score={:.3} mad={:.2} | 10_edge_corner score={:.3} border={:.2}",
-        near.score, near.review_groups, stats.grid.restored,
+        near.score, near.review_groups, near_restored,
         sizes.score, sizes.signals.size_mad,
         border.score, border.signals.border_touch
     );
