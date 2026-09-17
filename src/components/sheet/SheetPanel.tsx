@@ -1,4 +1,5 @@
 import { Comparator } from "./Comparator";
+import { GroupOverlay } from "./GroupOverlay";
 import { useStore } from "../../state/store";
 import { fmt } from "../../lib/compareModel";
 
@@ -43,6 +44,8 @@ export function SheetPanel() {
           close
         </button>
       </div>
+
+      <GroupOverlay />
 
       <div className="px-3">
         <button

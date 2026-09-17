@@ -15,6 +15,7 @@ pub mod containment;
 pub mod emit;
 pub mod grid;
 pub mod group;
+pub mod grouping;
 pub mod maskcache;
 pub mod merge;
 pub mod normalize;
@@ -46,8 +47,12 @@ pub use containment::{
 pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
 pub use grid::{detect_grid, GridFit, GridHint, GridParams, GridStats, GRID_VERSION};
 pub use group::{CclGrouper, RleCclGrouper};
+pub use grouping::{
+    GroupingParams, GroupingReport, GroupingSession, PreviewImage, SensitivityError,
+    SensitivityParams, SensitivityRanges, SplitHereReport, GROUPING_VERSION,
+};
 pub use maskcache::{
-    mask_key, mask_key_from_hash, regroup_cached, sheet_hash, CachedMask, MaskCache,
+    mask_key, mask_key_from_hash, regroup_cached, sheet_hash, CachedMask, MaskCache, MaskView,
     RegroupOutcome, MASKCACHE_VERSION,
 };
 pub use merge::{

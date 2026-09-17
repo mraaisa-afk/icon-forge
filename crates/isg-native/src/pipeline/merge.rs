@@ -179,6 +179,13 @@ pub struct RefineStats {
     pub grid: GridStats,
     /// F3 containment counters (W10).
     pub containment: ContainmentStats,
+    /// The measured F5 lattice hint — valleys, regularity and the grid flags.
+    /// Kept so the UI can draw the lattice and re-score after manual edits (W12).
+    pub hint: GridHint,
+    /// The original components F5 handed back from provably wrong merges. Kept
+    /// so a manual edit can re-score the edited list without silently dropping
+    /// the review items the user was shown (W12).
+    pub restored_originals: Vec<IconGroup>,
     /// §3.4 confidence score, its signals and the review list (W11).
     pub confidence: ConfidenceReport,
     /// Wall-clock for F4 + F1 + F2 + F5 + F3 + confidence, in milliseconds.
@@ -719,6 +726,8 @@ pub fn refine_groups_with_context(
             &params.confidence,
         );
     }
+    stats.hint = hint;
+    stats.restored_originals = restored_originals;
     stats.elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
     (current, stats)
 }
@@ -731,7 +740,6 @@ pub fn rule_label(rule: MergeRule) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::containment::ContainmentParams;
     use super::super::group::RleCclGrouper;
     use super::*;
     use isg_core::GroupingStrategy;

@@ -199,16 +199,20 @@ impl MaskCache {
 }
 
 /// RLE CCL ignores luma, which is what lets the cached path work without the
-/// sheet — this view supplies the dimensions and a contract-respecting empty
-/// luma row so the trait is not abused.
-struct MaskView {
+/// sheet — this view supplies the dimensions and a contract-respecting zero
+/// luma row so the trait is not abused. Public so the grouping session (W12)
+/// can CCL a cached mask without the sheet too.
+#[derive(Clone, Debug)]
+pub struct MaskView {
     w: u32,
     h: u32,
     row: Vec<f32>,
 }
 
 impl MaskView {
-    fn new(w: u32, h: u32) -> Self {
+    /// A `width × height` view whose luma row is all zeros.
+    #[must_use]
+    pub fn new(w: u32, h: u32) -> Self {
         Self {
             w,
             h,

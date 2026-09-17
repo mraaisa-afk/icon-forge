@@ -10,6 +10,16 @@
  * developed and smoke-tested without the native backend.
  */
 
+/** A sheet-space box, as the commands take it (readonly: the UI's `Bbox`). */
+export type Box4 = readonly [number, number, number, number];
+
+import type {
+  GroupingDto,
+  SensitivityDto,
+  SheetPreviewDto,
+  SplitHereDto,
+} from "./groupModel";
+
 export interface ProjectInfo {
   path: string;
   sheetCount: number;
@@ -92,6 +102,16 @@ interface Backend {
   ): Promise<IconSvgDto>;
   /** Submit the T2 batch vectorization job for one sheet. */
   vectorizeSheetSubmit(sheetId: string, preset: string): Promise<number>;
+  /** Group All: groups every icon on the sheet (W12 overlay). */
+  groupAll(sheetId: string): Promise<GroupingDto>;
+  /** Moves the sensitivity sliders and re-groups from the cached mask. */
+  groupSetSensitivity(sheetId: string, sensitivity: SensitivityDto): Promise<GroupingDto>;
+  /** Split Here: splits the group under one point (≤ 20 ms budget). */
+  groupSplitHere(sheetId: string, x: number, y: number): Promise<SplitHereDto>;
+  /** Group Selected: the marquee's groups collapse into one icon. */
+  groupSelected(sheetId: string, boxes: readonly Box4[]): Promise<GroupingDto>;
+  /** Downscaled PNG of the normalized sheet — the overlay backdrop. */
+  sheetPreview(sheetId: string, maxDim: number): Promise<SheetPreviewDto>;
 }
 
 // ---- Tauri backend -------------------------------------------------------
@@ -140,6 +160,21 @@ async function tauriBackend(): Promise<Backend> {
     async vectorizeSheetSubmit(sheetId, preset) {
       return invoke<number>("vectorize_sheet_submit", { request: { sheetId, preset } });
     },
+    async groupAll(sheetId) {
+      return invoke<GroupingDto>("group_all", { sheetId });
+    },
+    async groupSetSensitivity(sheetId, sensitivity) {
+      return invoke<GroupingDto>("group_set_sensitivity", { sheetId, sensitivity });
+    },
+    async groupSplitHere(sheetId, x, y) {
+      return invoke<SplitHereDto>("group_split_here", { sheetId, x, y });
+    },
+    async groupSelected(sheetId, boxes) {
+      return invoke<GroupingDto>("group_selected", { request: { sheetId, boxes } });
+    },
+    async sheetPreview(sheetId, maxDim) {
+      return invoke<SheetPreviewDto>("sheet_preview", { sheetId, maxDim });
+    },
   };
 }
 
@@ -149,12 +184,33 @@ async function tauriBackend(): Promise<Backend> {
 const MOCK_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGM4ce0RVsQwtCQAfeqgAYPP7GUAAAAASUVORK5CYII=";
 
+/** Default sensitivity, mirroring `SensitivityParams` on the native side. */
+const MOCK_SENSITIVITY: SensitivityDto = {
+  mergeGapFrac: 0.35,
+  mergeAreaRatio: 1.75,
+  noiseMinArea: 16,
+  gridRegularityMin: 0.75,
+};
+
+/** Slider envelope, mirroring `SensitivityParams::RANGES`. */
+const MOCK_RANGES: Record<keyof SensitivityDto, [number, number]> = {
+  mergeGapFrac: [0.05, 1],
+  mergeAreaRatio: [1, 8],
+  noiseMinArea: [0, 512],
+  gridRegularityMin: [0, 1],
+};
+
 class MockBackend implements Backend {
   private sheets: SheetDto[] = [];
   private icons = new Map<string, IconDto[]>();
   private listeners = new Set<Listener>();
   private nextJob = 1;
   private path: string | null = null;
+  /** Group All results, per sheet (the browser stand-in for the mask cache). */
+  private grouping = new Map<string, GroupingDto>();
+  private groupingSeen = new Set<string>();
+  private groupingSensitivity = new Map<string, SensitivityDto>();
+  private previews = new Map<string, SheetPreviewDto>();
 
   private require(): true {
     if (this.path === null) throw new Error("no project is open (browser mock)");
@@ -165,18 +221,30 @@ class MockBackend implements Backend {
     for (const l of this.listeners) l(e);
   }
 
+  /** Drops every derived cache — a different project invalidates all of them. */
+  private reset(): void {
+    this.grouping.clear();
+    this.groupingSeen.clear();
+    this.groupingSensitivity.clear();
+    this.previews.clear();
+    this.icons.clear();
+  }
+
   async projectOpen(path: string): Promise<ProjectInfo> {
+    this.reset();
     this.path = path;
     return { path, sheetCount: this.sheets.length, iconCount: 0 };
   }
 
   async projectCreate(path: string): Promise<ProjectInfo> {
+    this.reset();
     this.sheets = [];
     this.path = path;
     return { path, sheetCount: 0, iconCount: 0 };
   }
 
   async projectClose(): Promise<void> {
+    this.reset();
     this.path = null;
   }
 
@@ -283,6 +351,222 @@ class MockBackend implements Backend {
       this.emit({ kind: "finished", id, outcome: "succeeded", message: `mock vectorize · ${preset}` });
     })();
     return id;
+  }
+
+  // ---- W12 grouping ------------------------------------------------------
+
+  /**
+   * 4 columns × 3 rows of tiles derived from the sheet size. The merge-area
+   * slider is the one knob that visibly changes the mock: past 3× the first two
+   * tiles glue into one, which is what the real rule 5 does to a tight pair.
+   */
+  private syntheticGroups(sheetId: string, sensitivity: SensitivityDto): GroupingDto {
+    const sheet = this.sheets.find((s) => s.id === sheetId);
+    const width = sheet?.width ?? 256;
+    const height = sheet?.height ?? 192;
+    const gapX = Math.max(4, Math.round(width / 20));
+    const gapY = Math.max(4, Math.round(height / 20));
+    const cellW = Math.floor((width - gapX * 5) / 4);
+    const cellH = Math.floor((height - gapY * 4) / 3);
+    const tiles: Array<[number, number, number, number]> = [];
+    for (let row = 0; row < 3; row++) {
+      for (let col = 0; col < 4; col++) {
+        tiles.push([gapX + col * (cellW + gapX), gapY + row * (cellH + gapY), cellW, cellH]);
+      }
+    }
+    if (sensitivity.mergeAreaRatio >= 3 && tiles.length >= 2) {
+      const [a, b] = tiles;
+      tiles.splice(0, 2, [a[0], a[1], b[0] + b[2] - a[0], a[3]]);
+    }
+    const first = this.groupingSeen.has(sheetId);
+    const groups = tiles.map((bbox) => ({ bbox, area: bbox[2] * bbox[3] }));
+    const review = sensitivity.mergeAreaRatio >= 3 ? 2 : 1;
+    return {
+      sheetId,
+      width,
+      height,
+      groups,
+      warnings: [
+        {
+          group: Math.min(5, groups.length - 1),
+          kind: "spansMultipleCells" as const,
+          label: "spans multiple cells (mock)",
+        },
+        ...(review > 1
+          ? [
+              {
+                group: Math.min(1, groups.length - 1),
+                kind: "restoredFromMerge" as const,
+                label: "restored from a merge across a valley (mock)",
+              },
+            ]
+          : []),
+      ],
+      confidence: sensitivity.mergeAreaRatio >= 3 ? 0.9 : 0.94,
+      reviewGroups: review,
+      statusLine: `Grouped ${groups.length} icons in 0.00 s · confidence ${
+        sensitivity.mergeAreaRatio >= 3 ? 90 : 94
+      }% · ${review} groups need review`,
+      elapsedMs: 4,
+      maskCacheHit: first,
+      manualEdits: 0,
+      sensitivity,
+      hint: {
+        gridX: true,
+        gridY: true,
+        cellsX: 4,
+        cellsY: 3,
+        valleyX: Array.from({ length: 3 }, (_, i) => gapX * (i + 1) + cellW * (i + 1) - Math.round(gapX / 2)),
+        valleyY: Array.from({ length: 2 }, (_, i) => gapY * (i + 1) + cellH * (i + 1) - Math.round(gapY / 2)),
+      },
+      stats: {
+        input: tiles.length,
+        output: groups.length,
+        merges: sensitivity.mergeAreaRatio >= 3 ? 1 : 0,
+        restored: 0,
+        flagged: review,
+        resplit: 0,
+        iterations: 0,
+        medianH: cellH,
+        medianArea: cellW * cellH,
+        elapsedMs: 3,
+      },
+    };
+  }
+
+  async groupAll(sheetId: string): Promise<GroupingDto> {
+    this.require();
+    const sensitivity = this.groupingSensitivity.get(sheetId) ?? { ...MOCK_SENSITIVITY };
+    const dto = this.syntheticGroups(sheetId, sensitivity);
+    this.groupingSeen.add(sheetId);
+    this.grouping.set(sheetId, dto);
+    return dto;
+  }
+
+  /** The grouping currently on screen, grouped on demand (never re-groups an
+   * edited result — that is what `groupAll` is for). */
+  private current(sheetId: string): GroupingDto {
+    const existing = this.grouping.get(sheetId);
+    if (existing) return existing;
+    const dto = this.syntheticGroups(
+      sheetId,
+      this.groupingSensitivity.get(sheetId) ?? { ...MOCK_SENSITIVITY },
+    );
+    this.groupingSeen.add(sheetId);
+    this.grouping.set(sheetId, dto);
+    return dto;
+  }
+
+  async groupSetSensitivity(sheetId: string, sensitivity: SensitivityDto): Promise<GroupingDto> {
+    this.require();
+    const clamped = { ...sensitivity };
+    for (const key of Object.keys(MOCK_RANGES) as (keyof SensitivityDto)[]) {
+      const [lo, hi] = MOCK_RANGES[key];
+      const value = Number.isFinite(clamped[key]) ? clamped[key] : lo;
+      clamped[key] = Math.max(lo, Math.min(hi, value));
+    }
+    this.groupingSensitivity.set(sheetId, clamped);
+    const dto = this.syntheticGroups(sheetId, clamped);
+    // A regroup after the first one is a cache hit by construction.
+    const hit: GroupingDto = { ...dto, maskCacheHit: true };
+    this.groupingSeen.add(sheetId);
+    this.grouping.set(sheetId, hit);
+    return hit;
+  }
+
+  async groupSplitHere(sheetId: string, x: number, y: number): Promise<SplitHereDto> {
+    this.require();
+    const current = this.current(sheetId);
+    const index = current.groups.findIndex(
+      (g) =>
+        x >= g.bbox[0] && y >= g.bbox[1] && x < g.bbox[0] + g.bbox[2] && y < g.bbox[1] + g.bbox[3],
+    );
+    if (index < 0) throw new Error(`no group at (${x}, ${y})`);
+    const g = current.groups[index];
+    // Small tiles have no watershed structure — the mock refuses those, like
+    // the real guards do.
+    if (g.bbox[2] < 40) {
+      return { split: false, regions: 0, groupIndex: index, elapsedMs: 0.2, report: current };
+    }
+    const halfW = Math.max(1, Math.floor(g.bbox[2] / 2));
+    const groups = [...current.groups];
+    groups.splice(
+      index,
+      1,
+      { bbox: [g.bbox[0], g.bbox[1], halfW, g.bbox[3]], area: halfW * g.bbox[3] },
+      {
+        bbox: [g.bbox[0] + halfW, g.bbox[1], g.bbox[2] - halfW, g.bbox[3]],
+        area: (g.bbox[2] - halfW) * g.bbox[3],
+      },
+    );
+    const report: GroupingDto = {
+      ...current,
+      groups,
+      manualEdits: current.manualEdits + 1,
+      maskCacheHit: true,
+      statusLine: current.statusLine.replace(/^Grouped \d+ icons/, `Grouped ${groups.length} icons`),
+    };
+    this.grouping.set(sheetId, report);
+    return { split: true, regions: 2, groupIndex: index, elapsedMs: 0.4, report };
+  }
+
+  async groupSelected(
+    sheetId: string,
+    boxes: readonly Box4[],
+  ): Promise<GroupingDto> {
+    this.require();
+    const current = this.current(sheetId);
+    const hits = current.groups
+      .map((g, i) => ({ g, i }))
+      .filter(({ g }) =>
+        boxes.some(
+          (b) =>
+            g.bbox[0] < b[0] + b[2] &&
+            b[0] < g.bbox[0] + g.bbox[2] &&
+            g.bbox[1] < b[1] + b[3] &&
+            b[1] < g.bbox[1] + g.bbox[3],
+        ),
+      );
+    if (hits.length < 2) return current;
+    const x0 = Math.min(...hits.map((h) => h.g.bbox[0]));
+    const y0 = Math.min(...hits.map((h) => h.g.bbox[1]));
+    const x1 = Math.max(...hits.map((h) => h.g.bbox[0] + h.g.bbox[2]));
+    const y1 = Math.max(...hits.map((h) => h.g.bbox[1] + h.g.bbox[3]));
+    const groups = current.groups.filter((_, i) => !hits.some((h) => h.i === i));
+    groups.push({
+      bbox: [x0, y0, x1 - x0, y1 - y0],
+      area: hits.reduce((a, h) => a + h.g.area, 0),
+    });
+    const report: GroupingDto = {
+      ...current,
+      groups,
+      manualEdits: current.manualEdits + 1,
+      maskCacheHit: true,
+      statusLine: current.statusLine.replace(/^Grouped \d+ icons/, `Grouped ${groups.length} icons`),
+    };
+    this.grouping.set(sheetId, report);
+    return report;
+  }
+
+  async sheetPreview(sheetId: string, maxDim: number): Promise<SheetPreviewDto> {
+    this.require();
+    const cacheKey = `${sheetId}:${maxDim}`;
+    const cached = this.previews.get(cacheKey);
+    if (cached) return cached;
+    const sheet = this.sheets.find((s) => s.id === sheetId);
+    const sheetWidth = sheet?.width ?? 256;
+    const sheetHeight = sheet?.height ?? 192;
+    const longest = Math.max(sheetWidth, sheetHeight);
+    const scale = longest > maxDim ? maxDim / longest : 1;
+    const preview: SheetPreviewDto = {
+      png: MOCK_PNG,
+      width: Math.max(1, Math.round(sheetWidth * scale)),
+      height: Math.max(1, Math.round(sheetHeight * scale)),
+      sheetWidth,
+      sheetHeight,
+    };
+    this.previews.set(cacheKey, preview);
+    return preview;
   }
 
   async onJobEvent(listener: Listener): Promise<() => void> {

@@ -110,6 +110,75 @@ impl SheetRaster {
     }
 }
 
+impl SheetRaster {
+    /// Box-average downscale so the longest side is at most `max_dim` (never
+    /// upscales). Returns the output dimensions plus RGBA8 bytes.
+    ///
+    /// Every output pixel is the mean of the source pixels it covers, rounded
+    /// half-up in integer arithmetic: same input bytes ⇒ same output bytes,
+    /// which is what lets the overlay cache the encoded PNG.
+    #[must_use]
+    pub fn scaled_rgba(&self, max_dim: u32) -> (u32, u32, Vec<u8>) {
+        let longest = self.width.max(self.height);
+        if max_dim == 0 || longest <= max_dim {
+            return (self.width, self.height, self.rgba.clone());
+        }
+        let scale = |dim: u32| -> u32 {
+            (((u64::from(dim) * u64::from(max_dim)) / u64::from(longest)).max(1)) as u32
+        };
+        let (out_w, out_h) = (scale(self.width), scale(self.height));
+        let mut out = vec![0u8; 4 * out_w as usize * out_h as usize];
+        for oy in 0..out_h {
+            let y0 = (u64::from(oy) * u64::from(self.height) / u64::from(out_h)) as u32;
+            let y1 = (((u64::from(oy) + 1) * u64::from(self.height) / u64::from(out_h)) as u32)
+                .max(y0 + 1)
+                .min(self.height);
+            for ox in 0..out_w {
+                let x0 = (u64::from(ox) * u64::from(self.width) / u64::from(out_w)) as u32;
+                let x1 = (((u64::from(ox) + 1) * u64::from(self.width) / u64::from(out_w)) as u32)
+                    .max(x0 + 1)
+                    .min(self.width);
+                let mut sums = [0u64; 4];
+                let mut count = 0u64;
+                for y in y0..y1 {
+                    let base = y as usize * self.width as usize * 4;
+                    for x in x0..x1 {
+                        let px = &self.rgba[base + x as usize * 4..base + x as usize * 4 + 4];
+                        sums[0] += u64::from(px[0]);
+                        sums[1] += u64::from(px[1]);
+                        sums[2] += u64::from(px[2]);
+                        sums[3] += u64::from(px[3]);
+                        count += 1;
+                    }
+                }
+                let o = (oy as usize * out_w as usize + ox as usize) * 4;
+                // Round half-up: (2·sum + count) / (2·count).
+                let mean = [
+                    ((2 * sums[0] + count) / (2 * count)) as u8,
+                    ((2 * sums[1] + count) / (2 * count)) as u8,
+                    ((2 * sums[2] + count) / (2 * count)) as u8,
+                    ((2 * sums[3] + count) / (2 * count)) as u8,
+                ];
+                out[o..o + 4].copy_from_slice(&mean);
+            }
+        }
+        (out_w, out_h, out)
+    }
+
+    /// [`Self::scaled_rgba`] encoded as a lossless PNG — the overlay's
+    /// backdrop (the sheet the groups were measured on).
+    #[must_use]
+    pub fn preview_png(&self, max_dim: u32) -> (u32, u32, Vec<u8>) {
+        use image::ImageEncoder;
+        let (w, h, rgba) = self.scaled_rgba(max_dim);
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
+            .expect("png encode into Vec is infallible");
+        (w, h, png)
+    }
+}
+
 impl RasterView for SheetRaster {
     fn width(&self) -> u32 {
         self.width
@@ -148,6 +217,38 @@ mod tests {
         assert!((r.luma_row(0)[0] - red).abs() < 0.01, "red luma {red}");
         let gray = 0.299 * 240.0 + 0.587 * 240.0 + 0.114 * 240.0;
         assert!((r.luma_row(1)[1] - gray).abs() < 0.01);
+    }
+
+    #[test]
+    fn scaled_rgba_box_averages_and_never_upscales() {
+        // 4×4: left half black (opaque), right half white (opaque).
+        let mut rgba = vec![255u8; 4 * 4 * 4];
+        for y in 0..4usize {
+            for x in 0..2usize {
+                let i = (y * 4 + x) * 4;
+                rgba[i] = 0;
+                rgba[i + 1] = 0;
+                rgba[i + 2] = 0;
+            }
+        }
+        let r = SheetRaster::from_rgba(4, 4, rgba);
+        let (w, h, out) = r.scaled_rgba(2);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out.len(), 4 * 4);
+        // Each output pixel covers a 2×2 source block ⇒ mean 0 on the left,
+        // 255 on the right; alpha stays 255 everywhere.
+        assert_eq!(&out[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&out[4..8], &[255, 255, 255, 255]);
+        assert_eq!(&out[12..16], &[255, 255, 255, 255]);
+        // Identical input ⇒ identical output (the overlay cache relies on it).
+        assert_eq!(r.scaled_rgba(2).2, out);
+        // Never upscales.
+        let (w, h, same) = r.scaled_rgba(64);
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(same, r.rgba());
+        // A long thin sheet keeps its aspect ratio.
+        let wide = SheetRaster::from_rgba(8, 2, vec![128; 8 * 2 * 4]);
+        assert_eq!(wide.scaled_rgba(4), (4, 1, vec![128; 16]));
     }
 
     #[test]

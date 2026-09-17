@@ -14,6 +14,12 @@ import {
   type StatsDto,
 } from "../lib/backend";
 import { iconKey, type Bbox, type ViewMode } from "../lib/compareModel";
+import {
+  clampSensitivity,
+  type GroupingDto,
+  type SensitivityDto,
+  type SheetPreviewDto,
+} from "../lib/groupModel";
 
 export interface JobStatus {
   id: number;
@@ -44,6 +50,18 @@ export interface UiState {
   view: ViewMode;
   wipe: number;
 
+  // Group All overlay (W12).
+  /** The current grouping report for `selectedSheet`, or null before Group All. */
+  grouping: GroupingDto | null;
+  /** The overlay backdrop (downscaled sheet PNG). */
+  preview: SheetPreviewDto | null;
+  /** True while a grouping command is in flight. */
+  groupBusy: boolean;
+  /** Last Split Here / Group Selected outcome, shown under the overlay. */
+  groupNote: string | null;
+  /** Sliders the UI is showing; the backend echoes what it actually used. */
+  sensitivity: SensitivityDto | null;
+
   openProject: (path: string) => Promise<void>;
   createProject: (path: string) => Promise<void>;
   closeProject: () => Promise<void>;
@@ -62,6 +80,21 @@ export interface UiState {
   setWipe: (wipe: number) => void;
   /** Fetches (or serves from memo) the SVG+score for one icon+preset. */
   ensureIcon: (bbox: Bbox, preset: string) => Promise<void>;
+
+  /** Group All over the open sheet (loads the preview too, once). */
+  groupAll: () => Promise<void>;
+  /** Moves one sensitivity slider and re-groups from the cached mask. */
+  setSensitivity: (patch: Partial<SensitivityDto>) => Promise<void>;
+  /** Split Here at a sheet-space point. */
+  splitHere: (x: number, y: number) => Promise<void>;
+  /** Group Selected: merges every group the marquee boxes hit. */
+  groupSelected: (boxes: Bbox[]) => Promise<void>;
+  /** Drops manual edits by re-grouping from the cached mask. */
+  resetGrouping: () => Promise<void>;
+  /** Loads the overlay backdrop for the open sheet. */
+  loadPreview: () => Promise<void>;
+  /** Clears the overlay when the sheet changes. */
+  clearGrouping: () => void;
 }
 
 function jobFromEvent(e: JobEvent): JobStatus | null {
@@ -104,6 +137,12 @@ export const useStore = create<UiState>((set, get) => ({
   vectorized: {},
   view: "split",
   wipe: 0.5,
+
+  grouping: null,
+  preview: null,
+  groupBusy: false,
+  groupNote: null,
+  sensitivity: null,
 
   async openProject(path) {
     set({ busy: true, error: null });
@@ -179,7 +218,17 @@ export const useStore = create<UiState>((set, get) => ({
   },
 
   async openSheet(sheet) {
-    set({ selectedSheet: sheet, icons: [], comparing: null, sheetBusy: true, error: null });
+    set({
+      selectedSheet: sheet,
+      icons: [],
+      comparing: null,
+      sheetBusy: true,
+      error: null,
+      grouping: null,
+      preview: null,
+      groupNote: null,
+      sensitivity: null,
+    });
     try {
       const icons = await backend().then((b) => b.sheetIcons(sheet.id));
       if (get().selectedSheet?.id === sheet.id) set({ icons });
@@ -191,7 +240,15 @@ export const useStore = create<UiState>((set, get) => ({
   },
 
   closeSheet() {
-    set({ selectedSheet: null, icons: [], comparing: null });
+    set({
+      selectedSheet: null,
+      icons: [],
+      comparing: null,
+      grouping: null,
+      preview: null,
+      groupNote: null,
+      sensitivity: null,
+    });
   },
 
   async reloadIcons() {
@@ -235,6 +292,109 @@ export const useStore = create<UiState>((set, get) => ({
 
   setWipe(wipe) {
     set({ wipe });
+  },
+
+  async groupAll() {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    set({ groupBusy: true, error: null, groupNote: null });
+    try {
+      const b = await backend();
+      // The preview fills the mask cache natively, so running it first makes
+      // the grouping itself a cache hit and one decode serves both.
+      void get().loadPreview();
+      const grouping = await b.groupAll(sheet.id);
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({ grouping, sensitivity: grouping.sensitivity });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ groupBusy: false });
+    }
+  },
+
+  async setSensitivity(patch) {
+    const sheet = get().selectedSheet;
+    const current = get().sensitivity ?? get().grouping?.sensitivity;
+    if (!sheet || !current) return;
+    const next = clampSensitivity({ ...current, ...patch });
+    set({ sensitivity: next, groupBusy: true, error: null });
+    try {
+      const grouping = await backend().then((b) => b.groupSetSensitivity(sheet.id, next));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({
+        grouping,
+        sensitivity: grouping.sensitivity,
+        groupNote: `re-grouped with the sliders · ${grouping.elapsedMs.toFixed(1)} ms`,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ groupBusy: false });
+    }
+  },
+
+  async splitHere(x, y) {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    set({ groupBusy: true, error: null });
+    try {
+      const out = await backend().then((b) => b.groupSplitHere(sheet.id, x, y));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({
+        grouping: out.report,
+        sensitivity: out.report.sensitivity,
+        groupNote: out.split
+          ? `split group ${out.groupIndex} into ${out.regions} in ${out.elapsedMs.toFixed(2)} ms`
+          : `split refused for group ${out.groupIndex} (no watershed structure)`,
+      });
+    } catch (e) {
+      set({ error: String(e), groupNote: null });
+    } finally {
+      set({ groupBusy: false });
+    }
+  },
+
+  async groupSelected(boxes) {
+    const sheet = get().selectedSheet;
+    if (!sheet || boxes.length === 0) return;
+    const editsBefore = get().grouping?.manualEdits ?? 0;
+    set({ groupBusy: true, error: null });
+    try {
+      const grouping = await backend().then((b) => b.groupSelected(sheet.id, boxes));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({
+        grouping,
+        sensitivity: grouping.sensitivity,
+        groupNote:
+          grouping.manualEdits > editsBefore
+            ? `grouped the marquee · ${grouping.groups.length} icons`
+            : "the marquee hit fewer than two groups",
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ groupBusy: false });
+    }
+  },
+
+  async resetGrouping() {
+    await get().groupAll();
+  },
+
+  async loadPreview() {
+    const sheet = get().selectedSheet;
+    if (!sheet || get().preview) return;
+    try {
+      const preview = await backend().then((b) => b.sheetPreview(sheet.id, 1024));
+      if (get().selectedSheet?.id === sheet.id) set({ preview });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  clearGrouping() {
+    set({ grouping: null, preview: null, groupNote: null, sensitivity: null });
   },
 
   async ensureIcon(bbox, preset) {
