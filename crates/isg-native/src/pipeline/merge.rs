@@ -42,9 +42,10 @@
 
 use std::collections::HashMap;
 
-use isg_core::{Bbox, IconGroup};
+use isg_core::{Bbox, ForegroundMask, IconGroup};
 
 use super::group::sort_groups;
+use super::split::{split_overmerged, SplitParams, SplitStats};
 
 /// Bumped whenever merge behaviour changes, for the confidence/audit trail
 /// and cache keys in later work items.
@@ -57,6 +58,12 @@ pub const REFINE_VERSION: u32 = 1;
 pub struct RefineParams {
     /// Master switch. `false` ⇒ [`refine_groups`] is the identity function.
     pub enabled: bool,
+    /// F4 stage switch.
+    pub noise_enabled: bool,
+    /// F1 stage switch (`max_iterations` still caps the merge rounds).
+    pub merge_enabled: bool,
+    /// F2 over-merge split (W9).
+    pub split: SplitParams,
     /// F4 speckle: drop components with `area < noise_min_area`.
     pub noise_min_area: u32,
     /// F4 sliver: drop components with `min(w, h) < noise_min_dim`.
@@ -100,6 +107,9 @@ impl Default for RefineParams {
     fn default() -> Self {
         Self {
             enabled: false,
+            noise_enabled: true,
+            merge_enabled: true,
+            split: SplitParams::default(),
             noise_min_area: 16,
             noise_min_dim: 3,
             noise_max_aspect: 60.0,
@@ -150,7 +160,9 @@ pub struct RefineStats {
     pub refused_aspect: u32,
     /// Pairs refused by the height guard (rule 3).
     pub refused_height: u32,
-    /// Wall-clock for F4 + F1, in milliseconds.
+    /// F2 split counters (W9).
+    pub split: SplitStats,
+    /// Wall-clock for F4 + F1 + F2, in milliseconds.
     pub elapsed_ms: f32,
 }
 
@@ -483,28 +495,28 @@ fn merge_pass(
     true
 }
 
-/// F4 + F1 over the raw CCL components. `sheet_w`/`sheet_h` are the mask
-/// dimensions, needed for the frame/rule-line gate.
+/// §3.4 F4 + F1 + F2 over the raw CCL components. The mask provides the sheet
+/// dimensions (frame/rule-line gate) and the ink pixels the splitter needs.
 ///
 /// With `params.enabled == false` the input vector is returned unchanged.
 #[must_use]
 pub fn refine_groups(
     groups: Vec<IconGroup>,
-    sheet_w: u32,
-    sheet_h: u32,
+    mask: &ForegroundMask,
     params: &RefineParams,
 ) -> Vec<IconGroup> {
-    refine_groups_with_stats(groups, sheet_w, sheet_h, params).0
+    refine_groups_with_stats(groups, mask, params).0
 }
 
 /// [`refine_groups`] plus the evidence counters.
 #[must_use]
 pub fn refine_groups_with_stats(
     groups: Vec<IconGroup>,
-    sheet_w: u32,
-    sheet_h: u32,
+    mask: &ForegroundMask,
     params: &RefineParams,
 ) -> (Vec<IconGroup>, RefineStats) {
+    let sheet_w = mask.width();
+    let sheet_h = mask.height();
     let t0 = std::time::Instant::now();
     let mut stats = RefineStats {
         input: groups.len() as u32,
@@ -515,7 +527,11 @@ pub fn refine_groups_with_stats(
         return (groups, stats);
     }
 
-    let after_noise = noise_filter(groups, sheet_w, sheet_h, params);
+    let after_noise = if params.noise_enabled {
+        noise_filter(groups, sheet_w, sheet_h, params)
+    } else {
+        groups
+    };
     stats.removed_noise = stats.input - after_noise.len() as u32;
 
     // `median_h` for the F4b speck gate comes from the size-filtered set;
@@ -537,7 +553,7 @@ pub fn refine_groups_with_stats(
     stats.gap = gap;
 
     let mut current = kept;
-    if !current.is_empty() && median_h > 0.0 {
+    if params.merge_enabled && !current.is_empty() && median_h > 0.0 {
         for _ in 0..params.max_iterations {
             let merged = merge_pass(
                 &mut current,
@@ -552,6 +568,10 @@ pub fn refine_groups_with_stats(
             stats.iterations += 1;
         }
     }
+    if params.split.enabled && !current.is_empty() && median_h > 0.0 {
+        current = split_overmerged(current, mask, median_h, &params.split, &mut stats.split);
+    }
+
     sort_groups(&mut current);
     stats.elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
     (current, stats)
@@ -594,11 +614,22 @@ mod tests {
         group(x, y, w, h, w * h)
     }
 
+    /// F4 + F1 on, F2 off — the W8 stage tests isolate their own stage the
+    /// same way `max_iterations: 0` isolates F4 from F1.
     fn enabled() -> RefineParams {
         RefineParams {
             enabled: true,
+            split: SplitParams {
+                enabled: false,
+                ..SplitParams::default()
+            },
             ..RefineParams::default()
         }
+    }
+
+    /// A mask with the right dimensions and no ink: F4/F1 never read pixels.
+    fn blank(w: u32, h: u32) -> ForegroundMask {
+        ForegroundMask::new(w, h)
     }
 
     #[test]
@@ -608,7 +639,7 @@ mod tests {
             group(60, 10, 2, 2, 4),       // speckle
             group(100, 100, 300, 1, 300), // rule line
         ];
-        let out = refine_groups(groups.clone(), 512, 512, &RefineParams::default());
+        let out = refine_groups(groups.clone(), &blank(512, 512), &RefineParams::default());
         assert_eq!(out, groups, "disabled refine must not touch the input");
     }
 
@@ -632,7 +663,7 @@ mod tests {
         // Frame line: spans the full sheet width.
         groups.push(group(0, 200, 512, 15, 512 * 15));
 
-        let (out, stats) = refine_groups_with_stats(groups, 512, 512, &p);
+        let (out, stats) = refine_groups_with_stats(groups, &blank(512, 512), &p);
         assert_eq!(stats.input, 10);
         assert_eq!(
             stats.removed_noise, 4,
@@ -664,7 +695,7 @@ mod tests {
             box_body(300, 300, 40, 40),
             box_body(360, 300, 40, 40),
         ];
-        let (out, stats) = refine_groups_with_stats(inside, 512, 512, &p);
+        let (out, stats) = refine_groups_with_stats(inside, &blank(512, 512), &p);
         assert_eq!(stats.removed_noise, 1, "frame dropped before merging");
         assert_eq!(out.len(), 2);
 
@@ -675,7 +706,8 @@ mod tests {
             box_body(600, 300, 40, 40),
             box_body(660, 300, 40, 40),
         ];
-        let (out_big, stats_big) = refine_groups_with_stats(outside.clone(), 1024, 1024, &p);
+        let (out_big, stats_big) =
+            refine_groups_with_stats(outside.clone(), &blank(1024, 1024), &p);
         assert_eq!(
             stats_big.removed_noise, 0,
             "no border span on a larger sheet"
@@ -685,7 +717,7 @@ mod tests {
         // …and with the bodies *inside* it, containment merges them in.
         outside[1] = box_body(300, 300, 40, 40);
         outside[2] = box_body(360, 300, 40, 40);
-        let (merged, stats_merged) = refine_groups_with_stats(outside, 1024, 1024, &p);
+        let (merged, stats_merged) = refine_groups_with_stats(outside, &blank(1024, 1024), &p);
         assert_eq!(stats_merged.rule4, 2, "both bodies are contained");
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].bbox, Bbox::new(6, 6, 500, 500).unwrap());
@@ -699,7 +731,7 @@ mod tests {
         // rule 1: smaller height 12 ≤ 0.5 × 30 ✓
         // merged box (10,10,48,30): aspect 1.6 < 4 ✓, height 30 ≤ 1.9 × 21 ✓
         let groups = vec![box_body(10, 10, 30, 30), box_body(46, 24, 12, 12)];
-        let (out, stats) = refine_groups_with_stats(groups, 256, 256, &p);
+        let (out, stats) = refine_groups_with_stats(groups, &blank(256, 256), &p);
         assert_eq!(out.len(), 1, "fragment must join the body: {out:?}");
         assert_eq!(out[0].bbox, Bbox::new(10, 10, 48, 30).unwrap());
         assert_eq!(out[0].area, 30 * 30 + 12 * 12);
@@ -716,7 +748,7 @@ mod tests {
         // (4 ≤ 4.2) and the height ratio is 1.0 — only the area guard
         // (2 × 576 > 1.75 × 576) and rule 1's size factor stop the row glue.
         let groups: Vec<IconGroup> = (0..12).map(|i| box_body(10 + i * 28, 10, 24, 24)).collect();
-        let (out, stats) = refine_groups_with_stats(groups, 512, 512, &p);
+        let (out, stats) = refine_groups_with_stats(groups, &blank(512, 512), &p);
         assert_eq!(out.len(), 12, "uniform icons must never glue: {out:?}");
         assert_eq!(stats.merges, 0);
     }
@@ -732,7 +764,7 @@ mod tests {
         let filler: Vec<IconGroup> = (0..4).map(|i| box_body(200 + i * 60, 10, 30, 30)).collect();
         let mut groups = vec![body, arm];
         groups.extend(filler.iter().copied());
-        let (out, stats) = refine_groups_with_stats(groups, 512, 512, &p);
+        let (out, stats) = refine_groups_with_stats(groups, &blank(512, 512), &p);
         // Body y 10..40, arm y 18..42 ⇒ merged box (10,10,48,32).
         assert_eq!(out.len(), 5, "one merge: 6 → 5");
         assert_eq!(stats.merges, 1);
@@ -757,7 +789,7 @@ mod tests {
             .collect();
         let mut groups = vec![outer, inner];
         groups.extend(filler.iter().copied());
-        let (out, stats) = refine_groups_with_stats(groups, 512, 512, &p);
+        let (out, stats) = refine_groups_with_stats(groups, &blank(512, 512), &p);
         assert_eq!(stats.rule4, 1, "containment merges by rule 4");
         assert!(out
             .iter()
@@ -773,7 +805,7 @@ mod tests {
             box_body(28, 400, 40, 40), // overlap 12×40 = 480, IoU 0.43
         ];
         overlapping.extend(filler2.iter().copied());
-        let (out2, stats2) = refine_groups_with_stats(overlapping, 512, 512, &p);
+        let (out2, stats2) = refine_groups_with_stats(overlapping, &blank(512, 512), &p);
         assert_eq!(stats2.rule4, 1);
         assert!(out2
             .iter()
@@ -835,7 +867,7 @@ mod tests {
             groups.push(box_body(x, 10, 30, 30));
             groups.push(box_body(x + 36, 20, 10, 10));
         }
-        let (out, stats) = refine_groups_with_stats(groups, 1024, 1024, &p);
+        let (out, stats) = refine_groups_with_stats(groups, &blank(1024, 1024), &p);
         assert_eq!(stats.input, 24);
         assert_eq!(out.len(), 12, "each body absorbs exactly one fragment");
         assert_eq!(stats.merges, 12);
@@ -863,18 +895,18 @@ mod tests {
             group(204, 204, 18, 18, 324),
             box_body(300, 300, 40, 40),
         ];
-        let expected = refine_groups(groups.clone(), 512, 512, &p);
+        let expected = refine_groups(groups.clone(), &blank(512, 512), &p);
         let mut rng = Lcg::new(42);
         for _ in 0..25 {
             for i in (1..groups.len()).rev() {
                 let j = rng.next(i + 1);
                 groups.swap(i, j);
             }
-            let shuffled = refine_groups(groups.clone(), 512, 512, &p);
+            let shuffled = refine_groups(groups.clone(), &blank(512, 512), &p);
             assert_eq!(shuffled, expected, "refine must not depend on input order");
         }
         // Same input twice ⇒ identical output.
-        let again = refine_groups(expected.clone(), 512, 512, &p);
+        let again = refine_groups(expected.clone(), &blank(512, 512), &p);
         assert_eq!(again, expected, "second application must be stable");
     }
 
@@ -900,22 +932,98 @@ mod tests {
         );
 
         p.max_iterations = 0;
-        let (none, stats0) = refine_groups_with_stats(groups.clone(), 512, 512, &p);
+        let (none, stats0) = refine_groups_with_stats(groups.clone(), &blank(512, 512), &p);
         assert_eq!(stats0.iterations, 0, "cap 0 ⇒ F4 only, no F1");
         assert_eq!(none.len(), 5);
 
         p.max_iterations = 1;
-        let (one_pass, stats1) = refine_groups_with_stats(groups.clone(), 512, 512, &p);
+        let (one_pass, stats1) = refine_groups_with_stats(groups.clone(), &blank(512, 512), &p);
         assert_eq!(stats1.iterations, 1);
         assert_eq!(one_pass.len(), 4, "only the first link merges");
 
         p.max_iterations = 3;
-        let (chained, stats3) = refine_groups_with_stats(groups, 512, 512, &p);
+        let (chained, stats3) = refine_groups_with_stats(groups, &blank(512, 512), &p);
         assert_eq!(stats3.iterations, 2, "the chain needs exactly two passes");
         assert_eq!(chained.len(), 3, "body + both fragments");
         assert!(chained
             .iter()
             .any(|g| g.bbox == Bbox::new(10, 10, 84, 50).unwrap() && g.area == 2_112));
+    }
+
+    /// A minimal `RasterView` so the real CCL grouper can run on a test mask.
+    struct MaskView(ForegroundMask);
+
+    impl isg_core::RasterView for MaskView {
+        fn width(&self) -> u32 {
+            self.0.width()
+        }
+        fn height(&self) -> u32 {
+            self.0.height()
+        }
+        fn luma_row(&self, _y: u32) -> &[f32] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn full_stage_chain_splits_a_glued_blob_from_real_ccl_groups() {
+        use isg_core::GroupingStrategy;
+        // Twelve clean 24×24 icons on a 60 px pitch plus one 3×3 glued blob
+        // (24×24 cells, 2 px bridges) — the F1 cascade's signature failure.
+        // Real CCL gives 13 components; F4 leaves them alone; F1 merges
+        // nothing (gaps far exceed GAP = 8.4); F2 splits the blob into 9.
+        let mut mask = ForegroundMask::new(1024, 1024);
+        for i in 0..12u32 {
+            let x = 40 + i * 60;
+            for y in 40..64 {
+                for xx in x..x + 24 {
+                    mask.set(xx, y, true);
+                }
+            }
+        }
+        for r in 0..3u32 {
+            for c in 0..3u32 {
+                let x = 700 + c * 26;
+                let y = 700 + r * 26;
+                for yyy in y..y + 24 {
+                    for xxx in x..x + 24 {
+                        mask.set(xxx, yyy, true);
+                    }
+                }
+                if c + 1 < 3 {
+                    for yyy in y + 8..y + 16 {
+                        for xxx in x + 24..x + 26 {
+                            mask.set(xxx, yyy, true);
+                        }
+                    }
+                }
+                if r + 1 < 3 {
+                    for xxx in x + 8..x + 16 {
+                        for yyy in y + 24..y + 26 {
+                            mask.set(xxx, yyy, true);
+                        }
+                    }
+                }
+            }
+        }
+
+        let view = MaskView(mask.clone());
+        let raw = super::super::group::RleCclGrouper { min_area: 16 }.group_all(&view, &mask);
+        assert_eq!(raw.len(), 13, "12 icons + 1 glued blob");
+
+        let p = RefineParams {
+            enabled: true,
+            ..RefineParams::default()
+        };
+        let (out, stats) = refine_groups_with_stats(raw, &mask, &p);
+        assert_eq!(stats.removed_noise, 0);
+        assert_eq!(stats.merges, 0, "nothing is close enough to merge");
+        assert_eq!(stats.split.candidates, 1, "only the blob is oversized");
+        assert_eq!(stats.split.split, 1);
+        assert_eq!(out.len(), 12 + 9, "blob becomes 9 cell-sized groups");
+        let ink: u32 = out.iter().map(|g| g.area).sum();
+        let mask_ink: u32 = mask.runs().iter().map(|r| r.len()).sum();
+        assert_eq!(ink, mask_ink, "the whole chain conserves ink");
     }
 
     #[test]
@@ -926,7 +1034,7 @@ mod tests {
             .flat_map(|gy| (0..32u32).map(move |gx| box_body(gx * 32 + 4, gy * 32 + 4, 24, 24)))
             .collect();
         let t0 = std::time::Instant::now();
-        let (out, stats) = refine_groups_with_stats(groups, 4096, 4096, &p);
+        let (out, stats) = refine_groups_with_stats(groups, &blank(4096, 4096), &p);
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
         // 8 px gutters: rule 5's half-GAP gate (4.2) and rule 1's size factor
         // (equal heights) both refuse, so a neat grid never glues.

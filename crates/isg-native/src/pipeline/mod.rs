@@ -19,6 +19,7 @@ pub mod quantize;
 pub mod raster;
 pub mod score;
 pub mod simplify;
+pub mod split;
 pub mod trace;
 
 use isg_core::ForegroundMask;
@@ -43,6 +44,7 @@ pub use score::{
     cached_vectorize, vectorize_scored, Score, ScoreError, ScoredIcon, VectorizeError,
 };
 pub use simplify::SimplifyParams;
+pub use split::{SplitParams, SplitStats, SPLIT_VERSION};
 pub use trace::{vectorize_icon, IconVectors};
 
 /// Result of the segmentation stages (①–③).
