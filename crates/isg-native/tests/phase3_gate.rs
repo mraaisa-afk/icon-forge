@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use isg_core::{Bbox, IconGroup};
 use isg_native::pipeline::{
-    mask_cached, GroupingSession, MaskCache, RefineParams, SegParams, SensitivityParams,
+    mask_cached, GroupingSession, RefineParams, SegParams, SensitivityParams,
 };
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -84,14 +84,13 @@ fn load(name: &str) -> (Vec<u8>, Truth) {
 fn group_through(
     name: &str,
     session: &mut GroupingSession,
-    cache: &mut MaskCache,
     seg: &SegParams,
 ) -> (Vec<IconGroup>, f32, bool, Truth) {
     let (bytes, truth) = load(name);
     let key = session.key_for(&bytes, seg);
     let t0 = std::time::Instant::now();
-    let (_, _, hit) =
-        mask_cached(&bytes, 4096, seg, cache).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    let (_, _, hit) = mask_cached(&bytes, 4096, seg, session.cache_mut())
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
     let report = session
         .group_sheet(&key, hit)
         .unwrap_or_else(|| panic!("{name}: no report"));
@@ -125,9 +124,7 @@ fn c2_cold_group_all_is_under_two_seconds_with_exactly_100_groups() {
     let mut expected = 0u32;
     for run in 0..5 {
         let mut session = GroupingSession::new(2);
-        let mut cache = MaskCache::new(1);
-        let (g, cold_ms, hit, truth) =
-            group_through("12_c2_latency_grid", &mut session, &mut cache, &seg);
+        let (g, cold_ms, hit, truth) = group_through("12_c2_latency_grid", &mut session, &seg);
         assert!(!hit, "run {run}: the cache starts empty");
         times.push(cold_ms);
         groups = g.len();
@@ -149,13 +146,11 @@ fn c2_cold_group_all_is_under_two_seconds_with_exactly_100_groups() {
     // The same sheet, grouped again through a warm cache: no decode, identical
     // groups — the "feels live" path the sliders ride on.
     let mut session = GroupingSession::new(2);
-    let mut cache = MaskCache::new(2);
-    let (cold, cold_ms, _, truth) =
-        group_through("12_c2_latency_grid", &mut session, &mut cache, &seg);
+    let (cold, cold_ms, _, truth) = group_through("12_c2_latency_grid", &mut session, &seg);
     let (bytes, _) = load("12_c2_latency_grid");
     let key = session.key_for(&bytes, &seg);
     let t0 = std::time::Instant::now();
-    let (_, _, hit) = mask_cached(&bytes, 4096, &seg, &mut cache).unwrap();
+    let (_, _, hit) = mask_cached(&bytes, 4096, &seg, session.cache_mut()).unwrap();
     let warm_ms = t0.elapsed().as_secs_f32() * 1000.0;
     let warm = session.group_sheet(&key, hit).expect("regrouped");
     eprintln!(
@@ -163,7 +158,7 @@ fn c2_cold_group_all_is_under_two_seconds_with_exactly_100_groups() {
         warm.groups == cold,
         warm.groups.len(),
         truth.expected_groups,
-        cache.bytes()
+        session.cache().bytes()
     );
     assert!(hit, "the second pass must be a mask-cache hit");
     assert_eq!(warm.groups, cold, "a warm run groups identically");
@@ -179,15 +174,14 @@ fn phase3_exit_criteria_hold_on_this_run() {
 
     // C4 — rings and holes keep their exact boxes.
     let mut session = GroupingSession::new(2);
-    let mut cache = MaskCache::new(1);
-    let (groups, _ms, _hit, truth) =
-        group_through("03_rings_holes", &mut session, &mut cache, &seg);
+    let (groups, _ms, _hit, truth) = group_through("03_rings_holes", &mut session, &seg);
     assert_eq!(
         groups.len(),
         truth.expected_groups as usize,
         "C4 group count"
     );
     let c4_total = truth.icons.len();
+    let c4_icons = c4_total;
     let c4_rings = truth
         .icons
         .iter()
@@ -206,9 +200,7 @@ fn phase3_exit_criteria_hold_on_this_run() {
 
     // C5 — near-touching icons: exactly one group each, no false split/merge.
     let mut session = GroupingSession::new(2);
-    let mut cache = MaskCache::new(1);
-    let (groups, _ms, _hit, truth) =
-        group_through("09_near_touching", &mut session, &mut cache, &seg);
+    let (groups, _ms, _hit, truth) = group_through("09_near_touching", &mut session, &seg);
     let c5_groups = groups.len();
     let c5_expected = truth.expected_groups as usize;
     let mut false_splits = 0usize;
@@ -238,10 +230,7 @@ fn phase3_exit_criteria_hold_on_this_run() {
         c4_rings >= 20,
         "the C4 sheet is mostly rings/frames ({c4_rings})"
     );
-    assert!(
-        c4_groups == truth.icons.len(),
-        "C4: one group per truth icon"
-    );
+    assert!(c4_groups == c4_icons, "C4: one group per truth icon");
     assert_eq!(c5_groups, c5_expected, "C5: group count");
     assert_eq!(false_splits, 0, "C5: zero false splits");
     assert_eq!(false_merges, 0, "C5: zero false merges");
@@ -266,8 +255,7 @@ fn split_here_stays_inside_its_twenty_millisecond_budget() {
         "07_size_range",
     ] {
         let mut session = GroupingSession::new(2);
-        let mut cache = MaskCache::new(1);
-        let (groups, _ms, _hit, _truth) = group_through(name, &mut session, &mut cache, &seg);
+        let (groups, _ms, _hit, _truth) = group_through(name, &mut session, &seg);
         for g in &groups {
             let (cx, cy) = (g.bbox.x + g.bbox.w / 2, g.bbox.y + g.bbox.h / 2);
             let out = session
@@ -302,20 +290,15 @@ fn split_here_stays_inside_its_twenty_millisecond_budget() {
 fn group_selected_merges_the_marquee_and_rescores() {
     let seg = SegParams::default();
     let mut session = GroupingSession::new(2);
-    let mut cache = MaskCache::new(1);
-    let (auto, _ms, _hit, truth) =
-        group_through("12_c2_latency_grid", &mut session, &mut cache, &seg);
+    let (auto, _ms, _hit, truth) = group_through("12_c2_latency_grid", &mut session, &seg);
     assert_eq!(
         auto.len(),
         100,
         "the C2 sheet groups to exactly its 100 icons"
     );
-    let warnings_before = session
-        .current_report()
-        .expect("report")
-        .confidence
-        .warnings
-        .len();
+    let before = session.current_report().expect("report");
+    let warnings_before = before.confidence.warnings.len();
+    let score_before = before.confidence.score;
 
     // Two neighbours in the same row (the canonical order is (y, x); stage ③
     // erodes each box by a pixel or two, so match the row loosely).
@@ -352,6 +335,7 @@ fn group_selected_merges_the_marquee_and_rescores() {
         out.manual_edits,
         warnings_before,
         out.confidence.warnings.len(),
+        score_before,
         out.confidence.score,
     );
     assert_eq!(out.groups.len(), auto.len() - 1);
@@ -363,7 +347,7 @@ fn group_selected_merges_the_marquee_and_rescores() {
         "the union straddles a valley and must be flagged for review"
     );
     assert!(
-        out.confidence.score <= 1.0 && out.status_line.contains("need review"),
+        out.confidence.score <= 1.0 && out.status_line.contains("needs review"),
         "the status line follows the re-score: {}",
         out.status_line
     );
@@ -379,9 +363,7 @@ fn group_selected_merges_the_marquee_and_rescores() {
 fn sensitivity_slider_regroups_from_the_cached_mask() {
     let seg = SegParams::default();
     let mut session = GroupingSession::new(2);
-    let mut cache = MaskCache::new(2);
-    let (auto, cold_ms, hit, truth) =
-        group_through("07_size_range", &mut session, &mut cache, &seg);
+    let (auto, cold_ms, hit, truth) = group_through("07_size_range", &mut session, &seg);
     assert!(!hit, "the first grouping is cold");
     assert_eq!(auto.len() as u32, truth.expected_groups);
 
@@ -410,7 +392,7 @@ fn sensitivity_slider_regroups_from_the_cached_mask() {
     let (bytes, _) = load("07_size_range");
     let key = session.key_for(&bytes, &seg);
     let t0 = std::time::Instant::now();
-    let (_, _, warm_hit) = mask_cached(&bytes, 4096, &seg, &mut cache).unwrap();
+    let (_, _, warm_hit) = mask_cached(&bytes, 4096, &seg, session.cache_mut()).unwrap();
     let warm_ms = t0.elapsed().as_secs_f32() * 1000.0;
     assert!(warm_hit, "the slider path leaves the cached mask intact");
     assert!(session.current_key() == Some(key.as_str()));
@@ -442,8 +424,7 @@ fn grouping_is_deterministic_across_sessions_and_thread_counts() {
 
     let serialize = |name: &str| -> Vec<(u32, u32, u32, u32, u32, (u32, u32))> {
         let mut session = GroupingSession::new(2);
-        let mut cache = MaskCache::new(1);
-        let (groups, _ms, _hit, _truth) = group_through(name, &mut session, &mut cache, &seg);
+        let (groups, _ms, _hit, _truth) = group_through(name, &mut session, &seg);
         groups.iter().map(key).collect()
     };
 

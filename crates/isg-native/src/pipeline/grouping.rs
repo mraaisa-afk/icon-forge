@@ -289,6 +289,12 @@ impl GroupingSession {
         &mut self.params
     }
 
+    /// The mask cache, read-only (evidence lines, cache stats).
+    #[must_use]
+    pub fn cache(&self) -> &MaskCache {
+        &self.cache
+    }
+
     /// The mask cache, so the command layer can fill it through
     /// `pipeline::mask_cached`.
     #[must_use]
@@ -474,8 +480,11 @@ impl GroupingSession {
 
     fn regroup_current(&mut self) -> Option<GroupingReport> {
         let key = self.current_key()?.to_string();
-        let hit = self.current.as_ref().is_some_and(|c| c.mask_cache_hit);
-        self.group_sheet(&key, hit)
+        // A regroup always reads the mask out of `self.cache` (`group_sheet`
+        // cannot succeed otherwise), so no decode is paid here whatever the
+        // first grouping did — the flag must say so, or the UI would label a
+        // millisecond slider tick "fresh mask".
+        self.group_sheet(&key, true)
     }
 
     /// Re-scores the current list after a manual edit, with the evidence the
