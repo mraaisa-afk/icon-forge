@@ -30,7 +30,7 @@ pub use batch::{
 };
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
 pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
-pub use group::CclGrouper;
+pub use group::{CclGrouper, RleCclGrouper};
 pub use normalize::normalize;
 pub use profiles::{profile, TraceProfile};
 pub use quantize::{Layer, QuantizeParams};

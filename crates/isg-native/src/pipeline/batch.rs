@@ -28,7 +28,7 @@ use crate::db::{IconVectorRow, Library};
 use crate::rss::{current_rss_bytes, RssWatcher};
 
 use super::background::BackgroundModel;
-use super::group::CclGrouper;
+use super::group::RleCclGrouper;
 use super::raster::SheetRaster;
 use super::score::{vectorize_cache_key, vectorize_scored, ScoredIcon, VectorizeError};
 use super::{segment, SegParams};
@@ -198,7 +198,7 @@ pub fn vectorize_sheet_batch(
         return Err(BatchError::NoProject);
     }
     let out = segment(bytes, opts.max_dim, &opts.seg).map_err(BatchError::Segment)?;
-    let groups = CclGrouper {
+    let groups = RleCclGrouper {
         min_area: opts.min_area,
     }
     .group_all(&out.sheet, &out.mask);
