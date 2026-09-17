@@ -1,0 +1,30 @@
+[package]
+name = "isg-native"
+description = "Icon Forge native glue: SQLite persistence, streaming import, blake3 cache, atomic .isgproj saves, T0/T1/T2 job engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+isg-core = { workspace = true }
+rayon = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+blake3 = "1"
+walkdir = "2"
+zstd = "0.13"
+serde = { workspace = true }
+serde_json = { workspace = true }
+image = { workspace = true }
+kurbo = { workspace = true }
+resvg = { workspace = true }
+vtracer = { workspace = true }
+
+[dev-dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

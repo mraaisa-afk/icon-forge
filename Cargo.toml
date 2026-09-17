@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/isg-core",
+    "crates/isg-native",
+    "spike/groupall",
+    "tools/gen-corpus",
+    "src-tauri",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mraaisa-afk/icon-forge"
+
+[workspace.dependencies]
+isg-core = { path = "crates/isg-core" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vtracer = "1.0.0-alpha.4"
+# Phase 2 vectorization: SVG re-parse + rasterize scoring (resvg, MPL-2.0,
+# unmodified via adapter) and curve/geometry primitives (kurbo).
+# default-features off drops the font/text tree — emitted SVGs have no <text>.
+resvg = { version = "0.48", default-features = false }
+kurbo = "0.13"
+
+# Offline development (sandboxes without crates.io access): build the vendor
+# tree with scripts/fetch_vendor.py, then copy .cargo/config.vendor.toml.example
+# to .cargo/config.toml (gitignored). CI and normal development always use the
+# real crates.io registry — never commit a source replacement.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

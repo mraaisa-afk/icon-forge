@@ -1,0 +1,80 @@
+# cargo-deny policy — hard licensing constraints (Phase 0, enforced in CI).
+#
+# * GPL/AGPL (any version) are banned outright — the app must stay free of
+#   copyleft contamination (never potrace / autotrace).
+# * resvg (MPL-2.0) is allowed unmodified, behind an adapter (Phase 2).
+# * The allow-list below is deliberately narrow; adding a license family is a
+#   decision, not a default.
+#
+# This file must live at the repo root as `deny.toml` — that is the filename
+# cargo-deny (and cargo-deny-action) reads by default.
+#
+# SCHEMA (cargo-deny >= 0.18, "licenses v2" — the only supported schema;
+# EmbarkStudios/cargo-deny#611 removed `copyleft` and the v1 `deny` list):
+#   * Everything NOT in `allow` (or per-crate `exceptions`) is DENIED — the
+#     allow-list below is the single gate.
+#   * Copyleft licenses are denied structurally, with no config override —
+#     even if someone later adds one to `allow`, it stays blocked. This is
+#     stronger than the old explicit `deny = ["GPL-2.0", ...]` list: the
+#     GPL/AGPL/LGPL hard ban is now guaranteed by the tool itself and cannot
+#     be accidentally weakened by an allow-list edit.
+#   * Unlicensed crates (confidence < threshold) are denied.
+
+[graph]
+# Skip heavy graph walks we don't need yet.
+all-features = false
+
+[licenses]
+# Only these licenses may appear anywhere in the resolved graph.
+# (SPDX disjunctions like "MIT OR Unlicense" or "Apache-2.0 WITH
+# LLVM-exception OR ..." pass when ANY alternative is allowed here.)
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    # Apache-2.0 + LLVM exception: the exception only ADDS a perpetual,
+    # royalty-free grant (it is strictly more permissive than Apache-2.0
+    # alone). Required by `target-lexicon`, a transitive dep of Tauri's
+    # Linux system-deps stack. This is a specific SPDX compound expression,
+    # not a new license family.
+    "Apache-2.0 WITH LLVM-exception",
+]
+
+# Anything unidentifiable with high confidence fails the build.
+confidence-threshold = 0.9
+
+[advisories]
+version = 2
+# Unmaintained (not vulnerable) crates pulled in transitively by the frozen
+# Tauri 2.x stack. None is reachable as an attack surface for our use; each
+# is re-evaluated when we bump Tauri. Vulnerability advisories stay denied.
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: build-time only, via gtk/glib macro stack (Tauri Linux dep)" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property: via urlpattern (tauri-utils)" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range: via urlpattern (tauri-utils)" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common: via urlpattern (tauri-utils)" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident: via urlpattern (tauri-utils)" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version: via urlpattern (tauri-utils)" },
+]
+
+[bans]
+# Duplicate major versions are a review-time smell, not a hard fail (the
+# flo_curves 0.3 + 0.8 pair is expected while vtracer is pre-1.0).
+multiple-versions = "warn"
+skip = []
+
+[sources]
+# Registry only — no git dependencies in the final graph.
+# (The dev sandbox's offline vendor replacement is a local cargo source
+# rewrite outside the repo; CI resolves from plain crates.io.)
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+unknown-registry = "deny"
+unknown-git = "deny"

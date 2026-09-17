@@ -1,0 +1,136 @@
+# Icon Forge CI — Windows-first (the only shipping platform).
+#
+# * windows-latest: primary leg — frontend (typecheck, tests, build — dist/
+#   is a compile-time input of tauri's generate_context!), Rust build,
+#   tests (incl. the Phase 0 exit gate and the Phase 1 exit-criteria tests:
+#   10k import + kill-mid-save), spike benchmark, corpus regeneration
+#   consistency, wasm32 keystone check, fmt (BLOCKING since Phase 1),
+#   clippy.
+# * ubuntu-latest: quick leg — keystone check for every native crate except
+#   the Tauri shell (webview deps are Windows-only here) + license policy
+#   (cargo-deny-action is a container action, Linux-only; license analysis
+#   reads Cargo.lock metadata and is platform-independent).
+name: CI
+
+on:
+  push:
+    branches: [main, "arena/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-primary:
+    name: "Windows (primary): frontend + build + tests + benchmark + gates"
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Frontend (typecheck, unit tests, build)
+        shell: bash
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test
+          npm run build
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt clippy
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target
+          key: cargo-win-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-win-${{ runner.os }}-
+
+      - name: Check (release, workspace)
+        run: cargo check --workspace --release
+
+      - name: Tests (release) — Phase 0 gate + Phase 1 exit-criteria tests
+        # --nocapture: the exit-gate tests eprintln their measured
+        # numbers as evidence; libtest hides passing tests' output.
+        run: cargo test --workspace --release --no-fail-fast -- --nocapture
+
+      - name: Corpus regeneration consistency (truth JSONs must be byte-identical)
+        shell: bash
+        run: |
+          cargo run -p isg-gen-corpus --release -- --out target/regen-corpus
+          status=0
+          for f in target/regen-corpus/*.json; do
+            diff -u "bench/corpus/$(basename "$f")" "$f" || status=1
+          done
+          exit $status
+
+      - name: Spike benchmark — Phase 0 exit gate (exact counts, C2 keystone <= 2.0 s; JSON report in logs)
+        run: cargo run -p isg-spike-groupall --release -- --corpus bench/corpus --json
+
+      - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
+        run: cargo check --target wasm32-unknown-unknown -p isg-core
+
+      # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
+      # has no rustfmt, so formatting is verified here and fixed from the
+      # reported diffs.
+      - name: Format check (blocking since Phase 1)
+        run: cargo fmt --all --check
+
+      - name: Clippy (workspace, release)
+        run: cargo clippy --workspace --release -- -D warnings
+
+  ubuntu-quick:
+    name: "Ubuntu (quick): native keystone checks + license policy"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target
+          key: cargo-linux-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-
+
+      - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
+        run: cargo check --target wasm32-unknown-unknown -p isg-core
+
+      # The Tauri shell is excluded on this leg: its system webview deps
+      # (webkit2gtk et al.) are not installed here, and the only shipping
+      # platform is Windows. Every other workspace crate must be clean.
+      - name: Check all non-Tauri crates
+        run: cargo check -p isg-core -p isg-native -p isg-spike-groupall -p isg-gen-corpus
+
+      # Lives on this leg because cargo-deny-action is a container action
+      # (Linux-only on GitHub runners). Policy identical on every platform:
+      # default-deny licenses + structural copyleft ban (deny.toml).
+      - name: "License policy (cargo-deny: GPL/AGPL hard ban)"
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features

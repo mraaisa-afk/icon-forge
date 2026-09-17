@@ -1,0 +1,26 @@
+[package]
+name = "icon-forge"
+description = "Icon Forge — offline icon vectorization studio (Tauri shell: commands, job-engine wiring)"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "icon_forge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "icon-forge"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+isg-core = { workspace = true }
+isg-native = { path = "../crates/isg-native" }

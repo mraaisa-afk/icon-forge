@@ -1,0 +1,14 @@
+# Offline development recipe — READ BEFORE USE.
+#
+# Copy to .cargo/config.toml (gitignored — never commit the copy!) ONLY when
+# building in a network-isolated sandbox, AFTER building the vendor tree:
+#
+#   python3 scripts/fetch_vendor.py --vendor-root /opt/rust-dl/vendor
+#
+# This replaces the crates.io source with the local vendor directory.
+# CI and normal development must NEVER activate it (plain crates.io).
+[source.crates-io]
+replace-with = "vendored-local"
+
+[source.vendored-local]
+directory = "/opt/rust-dl/vendor"

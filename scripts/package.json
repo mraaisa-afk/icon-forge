@@ -1,0 +1,9 @@
+{
+  "name": "icon-forge-corpus-tools",
+  "private": true,
+  "type": "module",
+  "description": "JS mirror + verifier for the Phase 0 benchmark corpus (see scripts/gen-corpus.mjs)",
+  "dependencies": {
+    "jpeg-js": "^0.4.4"
+  }
+}

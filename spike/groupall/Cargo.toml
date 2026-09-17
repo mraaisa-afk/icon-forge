@@ -1,0 +1,17 @@
+[package]
+name = "isg-spike-groupall"
+description = "Phase 0 throwaway spike: segmentation + tracing 'Group All' with the exit-criteria gate"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+isg-core = { workspace = true }
+image = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+vtracer = { workspace = true }
+
+[dev-dependencies]
