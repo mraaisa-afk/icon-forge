@@ -143,8 +143,9 @@ impl std::fmt::Display for VectorizeError {
 
 impl std::error::Error for VectorizeError {}
 
-/// Renders `doc` at `w×h` and scores it against the crop's ink evidence
-/// (per-pixel max-component distance from `bg_rgba`).
+/// Renders `doc` at `w×h`, composites it over `bg_rgba` and scores it
+/// against the crop's ink evidence (per-pixel max-component distance
+/// from `bg_rgba`).
 pub fn score_svg(
     doc: &str,
     crop_rgba: &[u8],
@@ -167,9 +168,31 @@ pub fn score_svg(
         resvg::tiny_skia::Transform::from_scale(sx, sy),
         &mut pm.as_mut(),
     );
-    // Premultiplied RGBA bytes; the alpha byte is unaffected by the
-    // premultiplication.
-    let render_plane: Vec<u8> = pm.data().as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+    // Ink evidence of the render, measured exactly like the reference:
+    // distance from the background colour AFTER compositing the document
+    // over it. Colour presets paint the background cluster as an opaque
+    // layer, so the raw alpha plane is saturated everywhere and would
+    // score a perfect background as pure ink (CI actual, run 35231648156:
+    // ssim 0.0029 on flat colour icons); compositing reduces that layer
+    // to exactly the background (zero evidence) while ink keeps its
+    // alpha-weighted colour distance.
+    let bg16 = [u16::from(bg_rgba[0]), u16::from(bg_rgba[1]), u16::from(bg_rgba[2])];
+    let render_plane: Vec<u8> = pm
+        .data()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| {
+            let inv = 255 - u16::from(p[3]);
+            let mix = |c: u8, b: u16| u16::from(c) + (b * inv) / 255;
+            let ev = [
+                mix(p[0], bg16[0]).abs_diff(bg16[0]),
+                mix(p[1], bg16[1]).abs_diff(bg16[1]),
+                mix(p[2], bg16[2]).abs_diff(bg16[2]),
+            ];
+            u8::try_from(ev.iter().max().copied().unwrap_or(0)).unwrap_or(255)
+        })
+        .collect();
     let ref_plane: Vec<u8> = crop_rgba
         .as_chunks::<4>()
         .0
@@ -397,9 +420,26 @@ mod tests {
     fn identical_square_scores_near_perfect() {
         let doc = doc_for(SQUARE, 16, 16);
         let s = score_svg(&doc, &crop_square_at4(), BG, 16, 16).unwrap();
-        // The square is [10,10,10] on white, so reference ink is 245, not
-        // 255: mae floors at 64·10/(256·255) ≈ 0.0098 even for a perfect
-        // trace (CI-actual 0.009804 / ssim 0.9984 / iou 1.0 / comp 0.9963).
+        // The square is [10,10,10] on white, so reference ink evidence is
+        // 245. Composited scoring renders the true ink colour, so a
+        // perfect trace matches the reference exactly (mae ≈ 0).
+        assert!(s.mae < 0.02, "{s:?}");
+        assert!(s.ssim > 0.99, "{s:?}");
+        assert!(s.iou > 0.98, "{s:?}");
+        assert!(s.composite > 0.99, "{s:?}");
+    }
+
+    #[test]
+    fn opaque_background_layer_does_not_count_as_ink() {
+        // Colour presets emit the background cluster as an opaque layer.
+        // Ink evidence must come from distance-from-background of the
+        // composited render, not the alpha plane, which such a document
+        // saturates (CI actual, run 35231648156: ssim 0.0029).
+        let doc = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" \
+                   viewBox=\"0 0 16 16\"><title>icon</title><desc>Icon Forge</desc>\
+                   <rect width=\"16\" height=\"16\" fill=\"#ffffff\"/>\
+                   <rect x=\"4\" y=\"4\" width=\"8\" height=\"8\" fill=\"#0a0a0a\"/></svg>";
+        let s = score_svg(doc, &crop_square_at4(), BG, 16, 16).unwrap();
         assert!(s.mae < 0.02, "{s:?}");
         assert!(s.ssim > 0.99, "{s:?}");
         assert!(s.iou > 0.98, "{s:?}");
