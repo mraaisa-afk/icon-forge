@@ -92,6 +92,10 @@ pub struct SplitStats {
     pub fallback_profile: u32,
     /// Over-seeded components handled by the reseed fallback.
     pub fallback_reseed: u32,
+    /// Components submitted by the F5 grid hint (size gate skipped).
+    pub forced_candidates: u32,
+    /// Grid-flagged components actually replaced by ≥ 2 regions.
+    pub forced_split: u32,
     /// Components left alone by the fat guard.
     pub skipped_fat: u32,
     /// Components that produced no usable structure (kept whole).
@@ -131,6 +135,53 @@ pub(crate) fn split_overmerged(
     }
     sort_groups(&mut out);
     out
+}
+
+/// F5 back-edge: re-runs the watershed on components the grid hint flagged as
+/// spanning more than one cell.
+///
+/// The F2 *size* gate is deliberately skipped here — it exists because a large
+/// bbox alone does not prove a merge, and the valley-straddle test is exactly
+/// that missing evidence. Every other guard still applies: the `dt_max` fat
+/// guard, the ≥ 2 surviving regions requirement, sliver reattachment and the
+/// scan-index tie-breaks, so a single large solid icon is never cut and the
+/// result stays byte-deterministic.
+///
+/// Every group handed in is attempted; groups that fail every guard come back
+/// whole. Returns the new group list plus `(re-split count, regions produced)`.
+pub(crate) fn resplit_forced(
+    groups: Vec<IconGroup>,
+    mask: &ForegroundMask,
+    median_h: f32,
+    params: &SplitParams,
+    stats: &mut SplitStats,
+) -> (Vec<IconGroup>, u32, u32) {
+    if groups.is_empty() || !params.enabled || median_h <= 0.0 {
+        return (groups, 0, 0);
+    }
+    let mut out: Vec<IconGroup> = Vec::with_capacity(groups.len());
+    let mut forced_split = 0u32;
+    let mut regions_total = 0u32;
+    for g in groups {
+        stats.forced_candidates += 1;
+        stats.candidates += 1;
+        match try_split(&g, mask, median_h, params, stats) {
+            Some(regions) => {
+                forced_split += 1;
+                regions_total += regions.len() as u32;
+                stats.forced_split += 1;
+                stats.split += 1;
+                stats.regions += regions.len() as u32;
+                out.extend(regions);
+            }
+            None => {
+                stats.skipped_no_structure += 1;
+                out.push(g);
+            }
+        }
+    }
+    sort_groups(&mut out);
+    (out, forced_split, regions_total)
 }
 
 /// Attempts to split one component; `None` keeps it whole.

@@ -44,14 +44,16 @@ use std::collections::HashMap;
 
 use isg_core::{Bbox, ForegroundMask, IconGroup};
 
+use super::containment::{build_containment, ContainmentParams, ContainmentStats};
+use super::grid::{classify, detect_grid, GridFit, GridParams, GridStats};
 use super::group::sort_groups;
-use super::split::{split_overmerged, SplitParams, SplitStats};
+use super::split::{resplit_forced, split_overmerged, SplitParams, SplitStats};
 
 /// Bumped whenever merge behaviour changes, for the confidence/audit trail
 /// and cache keys in later work items.
-pub const REFINE_VERSION: u32 = 1;
+pub const REFINE_VERSION: u32 = 2;
 
-/// Tunables for the W8 refine stage. Defaults are the ARCHITECTURE.md §3.4
+/// Tunables for the refine chain. Defaults are the ARCHITECTURE.md §3.4
 /// values; `enabled` is false until the corpus is calibrated (W12), so the
 /// Phase 0–2 gates keep measuring the raw CCL output.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,6 +66,10 @@ pub struct RefineParams {
     pub merge_enabled: bool,
     /// F2 over-merge split (W9).
     pub split: SplitParams,
+    /// F5 grid-drift hint (W10).
+    pub grid: GridParams,
+    /// F3 hole/containment forest (W10).
+    pub containment: ContainmentParams,
     /// F4 speckle: drop components with `area < noise_min_area`.
     pub noise_min_area: u32,
     /// F4 sliver: drop components with `min(w, h) < noise_min_dim`.
@@ -110,6 +116,8 @@ impl Default for RefineParams {
             noise_enabled: true,
             merge_enabled: true,
             split: SplitParams::default(),
+            grid: GridParams::default(),
+            containment: ContainmentParams::default(),
             noise_min_area: 16,
             noise_min_dim: 3,
             noise_max_aspect: 60.0,
@@ -162,7 +170,11 @@ pub struct RefineStats {
     pub refused_height: u32,
     /// F2 split counters (W9).
     pub split: SplitStats,
-    /// Wall-clock for F4 + F1 + F2, in milliseconds.
+    /// F5 grid-hint counters (W10).
+    pub grid: GridStats,
+    /// F3 containment counters (W10).
+    pub containment: ContainmentStats,
+    /// Wall-clock for F4 + F1 + F2 + F5 + F3, in milliseconds.
     pub elapsed_ms: f32,
 }
 
@@ -430,6 +442,7 @@ fn merge_rule(
 /// then applied with union-find anchored on the lowest index.
 fn merge_pass(
     groups: &mut Vec<IconGroup>,
+    members: &mut Vec<Vec<IconGroup>>,
     gap: f32,
     stats: &mut RefineStats,
     p: &RefineParams,
@@ -476,22 +489,42 @@ fn merge_pass(
         return false;
     }
 
-    let mut acc: HashMap<u32, IconGroup> = HashMap::new();
+    // Provenance travels with the merge: F5 may later learn (from the grid)
+    // that a proximity merge was wrong, and undoing it needs the original
+    // components — re-splitting a *disjoint* union through the watershed is
+    // impossible, because the splitter only sees the connected component it
+    // starts from.
+    let mut acc: HashMap<u32, (IconGroup, Vec<IconGroup>)> = HashMap::new();
     for (i, g) in groups.iter().enumerate() {
         let root = find(&mut parent, i as u32);
-        match acc.get(&root) {
-            Some(existing) => {
-                let next = merged_group(existing, g);
-                acc.insert(root, next);
+        let mem = if i < members.len() {
+            members[i].clone()
+        } else {
+            vec![*g]
+        };
+        match acc.get_mut(&root) {
+            Some((existing, list)) => {
+                *existing = merged_group(existing, g);
+                list.extend(mem);
             }
             None => {
-                acc.insert(root, *g);
+                acc.insert(root, (*g, mem));
             }
         }
     }
-    let mut out: Vec<IconGroup> = acc.into_values().collect();
-    sort_groups(&mut out);
-    *groups = out;
+    let mut entries: Vec<(IconGroup, Vec<IconGroup>)> = acc.into_values().collect();
+    // Sort by the group's own scan key: for a union that equals its first
+    // member's key, so `members` stays index-aligned with `groups`.
+    entries.sort_by(|a, b| {
+        a.0.bbox
+            .y
+            .cmp(&b.0.bbox.y)
+            .then_with(|| a.0.bbox.x.cmp(&b.0.bbox.x))
+            .then_with(|| a.0.origin.0.cmp(&b.0.origin.0))
+            .then_with(|| a.0.origin.1.cmp(&b.0.origin.1))
+    });
+    *groups = entries.iter().map(|(g, _)| *g).collect();
+    *members = entries.into_iter().map(|(_, m)| m).collect();
     true
 }
 
@@ -553,10 +586,14 @@ pub fn refine_groups_with_stats(
     stats.gap = gap;
 
     let mut current = kept;
+    // Provenance for the F5 back-edge: `members[i]` are the pre-merge
+    // components that make up `current[i]`.
+    let mut members: Vec<Vec<IconGroup>> = current.iter().map(|g| vec![*g]).collect();
     if params.merge_enabled && !current.is_empty() && median_h > 0.0 {
         for _ in 0..params.max_iterations {
             let merged = merge_pass(
                 &mut current,
+                &mut members,
                 gap,
                 &mut stats,
                 params,
@@ -572,7 +609,66 @@ pub fn refine_groups_with_stats(
         current = split_overmerged(current, mask, median_h, &params.split, &mut stats.split);
     }
 
+    // F5 (W10): a regular lattice turns F1's merges that crossed a valley into
+    // provable merges — they are handed back to the watershed with the size
+    // gate skipped, because the hint *is* the evidence the gate stood in for.
+    if params.grid.enabled && !current.is_empty() && median_h > 0.0 {
+        let hint = detect_grid(mask, &params.grid, &mut stats.grid);
+        if hint.any() {
+            let min_area =
+                f64::from(params.grid.min_cells_to_resplit * median_h * median_h).round() as u64;
+            let mut eligible: Vec<bool> = vec![false; current.len()];
+            for (i, g) in current.iter().enumerate() {
+                if matches!(
+                    classify(&g.bbox, &hint, params.grid.span_tolerance),
+                    GridFit::SpansMultipleCells { .. }
+                ) {
+                    stats.grid.flagged += 1;
+                    if g.bbox.area() >= min_area {
+                        eligible[i] = true;
+                    }
+                }
+            }
+            let mut keep: Vec<IconGroup> = Vec::with_capacity(current.len());
+            let mut restored: Vec<IconGroup> = Vec::new();
+            let mut glue: Vec<IconGroup> = Vec::new();
+            for (i, g) in current.iter().enumerate() {
+                if !eligible[i] {
+                    keep.push(*g);
+                    continue;
+                }
+                if members.get(i).is_some_and(|m| m.len() >= 2) {
+                    // A proximity merge: the hint proves it crossed a valley, so
+                    // the original components come back verbatim.
+                    stats.grid.restored += 1;
+                    restored.extend(members[i].iter().copied());
+                } else if glue.len() < params.grid.max_resplit as usize {
+                    glue.push(*g);
+                }
+            }
+            if !restored.is_empty() || !glue.is_empty() {
+                stats.grid.resplit_candidates = glue.len() as u32 + stats.grid.restored;
+                let (rest, split, regions) =
+                    resplit_forced(glue, mask, median_h, &params.split, &mut stats.split);
+                keep.extend(restored);
+                keep.extend(rest);
+                sort_groups(&mut keep);
+                current = keep;
+                stats.grid.resplit = split;
+                stats.grid.regions = regions;
+            }
+        }
+    }
+
     sort_groups(&mut current);
+
+    // F3 (W10): containment forest + hole counts for confidence (W11) and the
+    // evenodd subpaths at trace time. Analysis only — the group list is
+    // unchanged, which is the point: a hole is background, never an icon.
+    if params.containment.enabled && !current.is_empty() {
+        let _forest =
+            build_containment(&current, mask, &params.containment, &mut stats.containment);
+    }
     stats.elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
     (current, stats)
 }
@@ -585,7 +681,10 @@ pub fn rule_label(rule: MergeRule) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::super::containment::ContainmentParams;
+    use super::super::group::RleCclGrouper;
     use super::*;
+    use isg_core::GroupingStrategy;
 
     struct Lcg(u64);
 
@@ -1024,6 +1123,105 @@ mod tests {
         let ink: u32 = out.iter().map(|g| g.area).sum();
         let mask_ink: u32 = mask.runs().iter().map(|r| r.len()).sum();
         assert_eq!(ink, mask_ink, "the whole chain conserves ink");
+    }
+
+    /// Hollow square outline (`ring`/`frame` corpus shape): `size` px box with
+    /// a `t` px stroke.
+    fn ring(mask: &mut ForegroundMask, x0: u32, y0: u32, size: u32, t: u32) {
+        for dy in 0..size {
+            for dx in 0..size {
+                if dx < t || dy < t || dx + t >= size || dy + t >= size {
+                    mask.set(x0 + dx, y0 + dy, true);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grid_hint_restores_merges_that_crossed_a_valley() {
+        // 4×4 lattice of rings, pitch 56 (8 px gaps, inside rule 5's window).
+        // One cell holds a smaller ring so rule 5's area guard has the size
+        // asymmetry it needs — two equal rings are refused, which is the W8
+        // anchor test's whole point.
+        let mut mask = blank(300, 300);
+        for row in 0..4u32 {
+            for col in 0..4u32 {
+                let small = row == 2 && col == 2;
+                let size = if small { 30 } else { 48 };
+                ring(&mut mask, 10 + col * 56, 10 + row * 56, size, 4);
+            }
+        }
+        let raster = crate::pipeline::raster::SheetRaster::from_rgba(1, 1, vec![0, 0, 0, 0]);
+        let groups = RleCclGrouper::default().group_all(&raster, &mask);
+        assert_eq!(groups.len(), 16, "16 separate rings before merging");
+        let params = enabled();
+        let (out, stats) = refine_groups_with_stats(groups, &mask, &params);
+        assert!(
+            stats.merges >= 1,
+            "the lattice must provoke a rule-5 merge: {stats:?}"
+        );
+        assert!(
+            stats.grid.flagged >= 1 && stats.grid.restored >= 1,
+            "the grid hint must undo what it proves wrong: {stats:?}"
+        );
+        assert_eq!(out.len(), 16, "count is back to the raw CCL count");
+        // Invariant after the whole chain: on a detected lattice no surviving
+        // group may straddle a valley.
+        let gp = GridParams::default();
+        let mut gstats = GridStats::default();
+        let hint = detect_grid(&mask, &gp, &mut gstats);
+        assert!(hint.any(), "lattice detected: {hint:?}");
+        for g in &out {
+            assert!(
+                !matches!(
+                    classify(&g.bbox, &hint, gp.span_tolerance),
+                    GridFit::SpansMultipleCells { .. }
+                ),
+                "group {:?} still spans cells",
+                g.bbox
+            );
+        }
+    }
+
+    #[test]
+    fn containment_closes_the_chain() {
+        // A ring plus a dot in its hole. With merging off the two stay
+        // separate and F3 must report: one hole on the ring, depth 1 on the
+        // dot, one root. With merging on, rule 4 (containment) glues the dot
+        // into the ring — the §3.4 behaviour — and the ring still reports its
+        // hole afterwards.
+        let mut mask = blank(64, 64);
+        ring(&mut mask, 8, 8, 48, 6);
+        // 16×16: big enough to survive F4b's speck gate (dims > 0.35·median_h).
+        for dy in 0..16 {
+            for dx in 0..16 {
+                mask.set(24 + dx, 24 + dy, true);
+            }
+        }
+        let raster = crate::pipeline::raster::SheetRaster::from_rgba(1, 1, vec![0, 0, 0, 0]);
+        let groups = RleCclGrouper::default().group_all(&raster, &mask);
+        assert_eq!(groups.len(), 2);
+
+        let split_params = RefineParams {
+            enabled: true,
+            merge_enabled: false,
+            ..enabled()
+        };
+        let (out, stats) = refine_groups_with_stats(groups.clone(), &mask, &split_params);
+        assert_eq!(out.len(), 2, "ring and dot stay two groups");
+        assert_eq!(stats.containment.holes, 1, "the ring encloses one hole");
+        let mut cstats = ContainmentStats::default();
+        let forest = build_containment(&out, &mask, &split_params.containment, &mut cstats);
+        let depths: Vec<u32> = forest.nodes.iter().map(|n| n.depth).collect();
+        assert!(depths.contains(&0) && depths.contains(&1), "{depths:?}");
+        assert_eq!(forest.roots, 1, "the dot hangs inside the ring's hole");
+
+        let (merged, mstats) = refine_groups_with_stats(groups, &mask, &enabled());
+        assert_eq!(merged.len(), 1, "rule 4 merges a contained dot");
+        assert_eq!(
+            mstats.containment.holes, 1,
+            "the hole survives the containment merge"
+        );
     }
 
     #[test]

@@ -10,7 +10,9 @@
 pub mod background;
 pub mod batch;
 pub mod clean;
+pub mod containment;
 pub mod emit;
+pub mod grid;
 pub mod group;
 pub mod merge;
 pub mod normalize;
@@ -31,7 +33,12 @@ pub use batch::{
     vectorize_sheet_batch, BatchError, BatchOptions, BatchSummary, SharedLibrary, SheetRef,
 };
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
+pub use containment::{
+    build_containment, Containment, ContainmentForest, ContainmentParams, ContainmentStats,
+    CONTAINMENT_VERSION,
+};
 pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
+pub use grid::{detect_grid, GridFit, GridHint, GridParams, GridStats, GRID_VERSION};
 pub use group::{CclGrouper, RleCclGrouper};
 pub use merge::{
     refine_groups, refine_groups_with_stats, RefineParams, RefineStats, REFINE_VERSION,
