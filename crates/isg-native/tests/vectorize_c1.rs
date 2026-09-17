@@ -177,7 +177,7 @@ fn c1_batch_exit_gate_1024_icons() {
         }
     }
     for (sh, (sum, min, n)) in &by_shape {
-        eprintln!("C1 {sh}: n={n} mean_ssim={:.4} min_ssim={:.4}", sum / f32::from(*n), min);
+        eprintln!("C1 {sh}: n={n} mean_ssim={:.4} min_ssim={:.4}", sum / *n as f32, min);
     }
     eprintln!("C1 peak RSS: {} MiB (budget 2048)", s1.peak_rss_bytes / (1024 * 1024));
     assert!(
