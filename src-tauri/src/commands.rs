@@ -306,6 +306,169 @@ impl From<&IconVectorRow> for IconDto {
     }
 }
 
+/// A single icon's final SVG + score (review preview / W5 comparator).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IconSvgDto {
+    /// Validated SVG document.
+    pub svg: String,
+    /// True when served from the stage ⑧ cache.
+    pub cached: bool,
+    /// Quality score against the source crop.
+    pub score: ScoreDto,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorizeSheetRequest {
+    /// Hex-encoded 16-byte sheet id.
+    pub sheet_id: String,
+    /// §3.3-⑤ preset doc name (e.g. `mono-clean`, `flat-8`).
+    pub preset: String,
+}
+
+/// Submits T2 bulk vectorization of one sheet; progress flows through the
+/// usual `job://event` stream, results land in the icons table + cache.
+#[tauri::command]
+pub fn vectorize_sheet_submit(
+    state: State<'_, App>,
+    engine: State<'_, JobEngine>,
+    req: VectorizeSheetRequest,
+) -> CmdResult<u64> {
+    let id = parse_hex16(&req.sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {}", req.sheet_id),
+    })?;
+    let preset = preset_from_name(&req.preset).ok_or_else(|| CmdError {
+        message: format!("unknown preset: {}", req.preset),
+    })?;
+    {
+        let guard = state.lock()?;
+        let Some(lib) = guard.as_ref() else {
+            return Err(CmdError {
+                message: "no project is open".into(),
+            });
+        };
+        if lib.sheet_by_id(&id)?.is_none() {
+            return Err(CmdError {
+                message: "sheet not found".into(),
+            });
+        }
+    }
+    let job_id = engine.submit(Box::new(VectorizeSheetJob {
+        sheet_id: id,
+        preset,
+        library_slot: state.slot(),
+    }));
+    Ok(job_id.0)
+}
+
+/// Vectorizes (or cache-serves) one icon and returns its SVG + score.
+#[tauri::command]
+pub fn vectorize_icon(
+    state: State<'_, App>,
+    sheet_id: String,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    preset: String,
+) -> CmdResult<IconSvgDto> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let preset = preset_from_name(&preset).ok_or_else(|| CmdError {
+        message: format!("unknown preset: {preset}"),
+    })?;
+    let bbox = Bbox::new(x, y, w, h).ok_or_else(|| CmdError {
+        message: "empty or invalid bbox".into(),
+    })?;
+    let guard = state.lock()?;
+    let Some(lib) = guard.as_ref() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let row = lib.sheet_by_id(&id)?.ok_or_else(|| CmdError {
+        message: "sheet not found".into(),
+    })?;
+    let store = CacheStore::new(cache_dir_for(lib.path()));
+    let bytes = std::fs::read(&row.source_path).map_err(|e| CmdError {
+        message: format!("read {}: {e}", row.source_path),
+    })?;
+    let seg_params = SegParams::default();
+    let out = segment(&bytes, 4096, &seg_params)?;
+    let (icon, cached) = cached_vectorize(
+        &store,
+        lib,
+        &out.sheet,
+        bbox,
+        &out.background,
+        preset,
+        &seg_params.to_cache_string(),
+    )?;
+    Ok(IconSvgDto {
+        svg: icon.svg,
+        cached,
+        score: ScoreDto {
+            mae: icon.score.mae,
+            ssim: icon.score.ssim,
+            iou: icon.score.iou,
+            composite: icon.score.composite,
+        },
+    })
+}
+
+/// Lists the vectorized icons stored for one sheet (comparator grid).
+#[tauri::command]
+pub fn sheet_icons(state: State<'_, App>, sheet_id: String) -> CmdResult<Vec<IconDto>> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let guard = state.lock()?;
+    let Some(lib) = guard.as_ref() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let rows = lib.icons_for_sheet(&id)?;
+    Ok(rows.iter().map(IconDto::from).collect())
+}
+
+/// Base64 PNG of one icon's crop from the normalized sheet — the exact
+/// pixels stage ⑧ scored (comparator A-side).
+#[tauri::command]
+pub fn sheet_crop(
+    state: State<'_, App>,
+    sheet_id: String,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> CmdResult<String> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let bbox = Bbox::new(x, y, w, h).ok_or_else(|| CmdError {
+        message: "empty or invalid bbox".into(),
+    })?;
+    let guard = state.lock()?;
+    let Some(lib) = guard.as_ref() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let row = lib.sheet_by_id(&id)?.ok_or_else(|| CmdError {
+        message: "sheet not found".into(),
+    })?;
+    let bytes = std::fs::read(&row.source_path).map_err(|e| CmdError {
+        message: format!("read {}: {e}", row.source_path),
+    })?;
+    let out = segment(&bytes, 4096, &SegParams::default())?;
+    let png = out.sheet.crop_png(bbox);
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png))
+}
+
 /// Largest accepted `sheet_preview` longest side. The overlay draws into a
 /// few hundred CSS pixels, so anything above this only costs bandwidth.
 pub const PREVIEW_MAX_DIM: u32 = 2048;
@@ -735,10 +898,8 @@ pub fn sheet_preview(
     let key = mask_key(&bytes, &seg);
     let mut slot = session_slot(&state)?;
     let session = slot.get_or_insert_with(|| GroupingSession::new(App::MASK_CACHE_SHEETS));
-    // Cloned up front so the miss path can borrow the session mutably.
-    let cached = session.preview(&key, max_dim).cloned();
-    let image = match cached {
-        Some(image) => image,
+    let image = match session.preview(&key, max_dim) {
+        Some(cached) => cached.clone(),
         None => {
             let out = segment(&bytes, 4096, &seg)?;
             let (width, height, png) = out.sheet.preview_png(max_dim);
@@ -763,7 +924,6 @@ pub fn sheet_preview(
         sheet_height: image.sheet_height,
     })
 }
-
 /// Registers all commands on the builder.
 pub fn register(builder: Builder<tauri::Wry>) -> Builder<tauri::Wry> {
     builder.invoke_handler(tauri::generate_handler![
@@ -785,4 +945,90 @@ pub fn register(builder: Builder<tauri::Wry>) -> Builder<tauri::Wry> {
         group_selected,
         sheet_preview,
     ])
+}
+
+/// Registration bookkeeping: the handler list and the `#[tauri::command]`
+/// attributes must agree.
+///
+/// CI's Windows leg is the only place this crate compiles, so a command that
+/// loses its attribute (or is never registered) would otherwise only fail after
+/// a full push/compile cycle — and with a macro error that names a command
+/// nobody deleted on purpose. This test reads the source file itself.
+#[cfg(test)]
+mod tests {
+    /// Command names in the `tauri::generate_handler![…]` list.
+    fn registered(source: &str) -> Vec<String> {
+        let start = source
+            .find("generate_handler![")
+            .expect("the handler list exists");
+        let rest = &source[start..];
+        let end = rest.find("])").expect("the handler list closes");
+        rest[..end]
+            .split(|c: char| c == ',' || c == '[' || c.is_whitespace())
+            // Identifiers only: this drops the `generate_handler!` token itself
+            // and the `tauri::` path prefix.
+            .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// True when `pub fn name(` is directly preceded by the command attribute.
+    fn annotated(source: &str, name: &str) -> bool {
+        let needle = format!("pub fn {name}(");
+        let Some(at) = source.find(&needle) else {
+            return false;
+        };
+        source[..at]
+            .lines()
+            .rev()
+            .find(|l| {
+                let l = l.trim();
+                !l.is_empty() && !l.starts_with("///") && !l.starts_with("//")
+            })
+            .is_some_and(|l| l.trim() == "#[tauri::command]")
+    }
+
+    #[test]
+    fn every_registered_command_is_a_command_function() {
+        let source = include_str!("commands.rs");
+        let names = registered(source);
+        assert!(
+            names.len() >= 17,
+            "the handler list looks truncated: {names:?}"
+        );
+        for name in &names {
+            assert!(
+                annotated(source, name),
+                "`{name}` is registered but is not a `#[tauri::command]`"
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_function_is_registered() {
+        let source = include_str!("commands.rs");
+        let names = registered(source);
+        let mut annotated = Vec::new();
+        for (i, line) in source.lines().enumerate() {
+            if line.trim() != "#[tauri::command]" {
+                continue;
+            }
+            let Some(next) = source.lines().nth(i + 1) else {
+                continue;
+            };
+            let next = next.trim();
+            let Some(rest) = next.strip_prefix("pub fn ") else {
+                continue;
+            };
+            let name = rest.split('(').next().unwrap_or_default().to_string();
+            annotated.push(name);
+        }
+        for name in &annotated {
+            assert!(
+                names.contains(name),
+                "`{name}` is a command but missing from the handler list"
+            );
+        }
+        assert_eq!(annotated.len(), names.len(), "counts must match");
+    }
 }
