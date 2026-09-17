@@ -19,7 +19,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use isg_core::{GroupingStrategy, RasterView, TracePreset};
+use isg_core::{GroupingStrategy, TracePreset};
 use rayon::prelude::*;
 
 use crate::cache::CacheStore;
