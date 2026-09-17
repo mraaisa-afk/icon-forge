@@ -95,20 +95,34 @@ jobs:
       # egress proxy). The job summary is served through the GitHub API
       # instead, so the run's own evidence numbers stay reviewable from
       # anywhere: gh api .../commits/<sha>/check-runs --jq '.check_runs[].output.summary'
-      - name: Evidence → job summary (API-readable)
+      - name: Evidence → job summary + annotation (API-readable)
         if: always()
         shell: bash
         run: |
+          EVIDENCE=$(grep -hE 'evidence:|^C[0-9]+ |^W[0-9]+ |peak RSS|SSIM|GAP=' \
+            target/test-evidence.txt 2>/dev/null | head -100 || true)
+          if [ -z "$EVIDENCE" ]; then
+            EVIDENCE=$(tail -100 target/test-evidence.txt 2>/dev/null || true)
+          fi
           {
             echo "## Evidence (run-produced)"
             echo '```text'
-            grep -hE 'evidence|W[0-9]+ |C[0-9]+ |SSIM|MAE|IoU|composite|peak RSS|keystone|groups|ms' \
-              target/test-evidence.txt 2>/dev/null | head -120 || true
+            printf '%s\n' "$EVIDENCE"
             echo '```'
             echo '```json'
             tail -c 3000 target/spike-evidence.json 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # A job's markdown summary is NOT exposed through the GitHub API
+          # (the job's check-run `output.summary` stays null), but annotations
+          # are. So the same block is republished as one notice annotation,
+          # which a network-isolated reviewer can read with:
+          #   gh api /repos/<owner>/<repo>/check-runs/<job_id>/annotations
+          MSG=$(printf '%s' "$EVIDENCE" | head -c 60000 \
+            | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
+            | awk '{printf "%s%%0A", $0}')
+          echo "::notice title=Icon Forge evidence::${MSG}"
 
       - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
         run: cargo check --target wasm32-unknown-unknown -p isg-core
