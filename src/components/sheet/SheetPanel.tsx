@@ -1,4 +1,5 @@
 import { Comparator } from "./Comparator";
+import { EditorGate } from "../editor/EditorGate";
 import { GroupOverlay } from "./GroupOverlay";
 import { useStore } from "../../state/store";
 import { fmt } from "../../lib/compareModel";
@@ -46,6 +47,8 @@ export function SheetPanel() {
       </div>
 
       <GroupOverlay />
+
+      <EditorGate />
 
       <div className="px-3">
         <button

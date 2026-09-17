@@ -233,6 +233,23 @@ Because this is pure arithmetic on cached metrics, it runs at **1000 icons in <2
 
 Plus keyboard triage: `A`pprove / `R`eject / `F`lag / `D`uplicate / `Space` overlay / `Shift+A` bulk — target 1000 icons in 15 minutes, every decision an undoable, timestamped command, exported as `review.csv`.
 
+### 3.7 The SVG editor as built (4A)
+
+**The document model is `isg-core::editor`** — `Doc` (nodes with an affine, fill, visibility and a path of line/cubic subpaths), `Command` (translate, scale, rotate, centre, fill, visibility, reorder, duplicate, delete) and a bounded `History` that stores each step's forward *and* inverse node operations. Two properties are load-bearing and tested: integers are stored exactly (inverse ops are built pointwise beside their forward op and applied in reverse, so index operations undo exactly), and the selection is canonicalised to z-order after every operation, which is what makes `redo(do(x))` produce the same state as `do(x)` rather than the same nodes in a different selection order. This is the one deliberate exception to the frozen-crate rule of §1.2: editing geometry is the same geometry the tracer emits, so both live in the crate that compiles for `wasm32` — see the note under §7.
+
+**The binding is hand-rolled, not `wasm-pack`/`wasm-bindgen`** (a deviation from §1.1, recorded here deliberately). `crates/isg-wasm` exports six `#[no_mangle] extern "C"` functions (`editor_call(feature, a, b)`, `editor_abi_version`, and the four table accessors) and owns two tables inside its own linear memory: 1 Mi words of input, 256 Ki words of output. Geometry travels as `f32` bit patterns through `u32` words, and text as UTF-8 packed four bytes per word; `ABI_VERSION` is 1. The rules that make it safe to hand the host raw words are:
+
+* **Every id list and node-record list ends with a zero word.** Ids are never 0, so a host can walk a list safely even when the output table still holds words from an earlier call — the bug that a "count records, then read" host hits.
+* **`ERROR` reports the most recent call**, and a failed call returns `0`; `ERR_*` codes 1–10 are a 1:1 map of `CommandError`, so a refusal is a code the UI can print, never a panic and never a silent no-op.
+* **The document blob is length-checked before use** (a 4-word header carrying its own word count, then a 10-word node header and a self-describing path blob), and a malformed or zero-sized blob is rejected rather than decoded into a 0×0 document.
+* The tables grow linear memory, which **detaches** typed views a host may have cached: the TypeScript adapter re-derives its views after every call, and the canvas walks the live buffer without caching one.
+
+**Rendering is Canvas2D as specified (§1.1), with two measured deviations.** Hit-testing runs in the engine (`PICK`/`MARQUEE`) rather than via `isPointInPath`, because the editor must agree with the geometry it stores, and the per-frame draw walks the output table through a `Float32Array` view with no per-node allocation rather than building `Path2D` objects: on a synthetic 1000-icon sheet (5000 paths, 15 000 segments) the allocation-free walk keeps the geometry pass under a frame's 16.6 ms budget, while decoding the same records into JavaScript objects costs ~4 µs per segment and blows the frame. The measured numbers are printed by the tests on every CI run.
+
+**SVG parsing is on the TypeScript side for 4A** (a deviation from §2's "geometry work in Rust"): the tracer already produces SVG, so `src/wasm/svgPath.ts` converts its `M/L/H/V/C/Z` output into node geometry, and refuses anything else (quadratic, arc, smooth variants) instead of guessing. Moving icon tracing behind the ABI — one call that turns a sheet bbox into document nodes — is 4B/4C work; the adapter's API does not change when it lands.
+
+**The Phase 4 exit criterion is checked in three places**, all on the real code path: the host-side ABI walk (4000 randomised sequences, inverted through `UNDO`/`REDO`), the module-table walk (600 iterations, through the exact entry point `editor_call` forwards to), and the TypeScript adapter walk (1000 iterations, through the same byte protocol the browser uses). The canvas half of the criterion (5000 paths @ 60 fps) is measured as the geometry pass described above, since rasterisation belongs to the webview.
+
 ---
 
 ## 4. Data Model (sketch)
@@ -373,6 +390,15 @@ pub trait Grouper {
 pub trait Leveler {
     fn level(&self, icons: &[IconMetrics], cell: CellSpec) -> Vec<Transform>;
 }
+
+// isg-core also owns the editor's document model, node/command types and the
+// bounded undo history (`isg_core::editor`, added in Phase 4A). It is the one
+// module that grew into the frozen crate after Phase 0, and deliberately so:
+// the editor must transform the *same* geometry the tracer emits, and Rust is
+// the only language both the native pipeline and the webview share. It keeps
+// the crate's hard constraints — zero dependencies, no platform types, builds
+// for wasm32-unknown-unknown with a `cargo check` — and `cargo check
+// --target wasm32-unknown-unknown -p isg-core` remains the enforcement.
 
 pub trait ReviewScorer {
     fn score_quality(&self, icon: &SvgIcon, reference: &RasterImage) -> QualityScore;

@@ -21,3 +21,7 @@
 # Frontend (phases 4+)
 node_modules/
 dist/
+# Built editor module (cargo build --target wasm32-unknown-unknown -p isg-wasm,
+# copied into public/ for the dev server and for the app bundle)
+public/isg_wasm.wasm
+crates/isg-wasm/pkg/

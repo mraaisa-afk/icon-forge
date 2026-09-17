@@ -1,0 +1,352 @@
+/**
+ * Editor state: one loaded document, its selection, and the history the toolbar
+ * drives.
+ *
+ * All editing happens in the WASM session (ARCHITECTURE §2: per-frame work never
+ * crosses the IPC boundary). The store's job is to keep the React-visible mirror
+ * of that state in sync and to translate UI gestures into ABI commands — nothing
+ * here computes geometry.
+ *
+ * Loading an icon *does* cross the boundary, once per icon: the Rust tracer
+ * produces the outlines (Phase 2/3 work, cached by stage-8 keys) and the adapter
+ * turns them into node geometry. 4A caps how many icons it loads (see
+ * [`EDITOR_ICON_LIMIT`]) so opening the editor on a 1024-icon sheet stays snappy;
+ * paging the rest in is 4B work.
+ */
+
+import { create } from "zustand";
+
+import type { Box, EditorCommand, NodeSpec, Rgba } from "../wasm/abi";
+import { EditorSession, type HistoryView } from "../wasm/editor";
+import { parsePathData, readSvgPaths } from "../wasm/svgPath";
+import { backend, type Box4, type SheetDto } from "../lib/backend";
+
+/** How many icons one editor session loads (the rest is 4B work). */
+export const EDITOR_ICON_LIMIT = 64;
+
+/** Where the app serves the built editor module from (`public/`). */
+export const EDITOR_MODULE_URL = "isg_wasm.wasm";
+
+/** The preset icons are traced with when the editor loads them. */
+export const EDITOR_PRESET = "flat-8";
+
+/** Fallback fill for a traced icon whose SVG carries no usable colour. */
+const DEFAULT_FILL: Rgba = [214, 219, 227, 255];
+
+/** Colours the fill button cycles through. */
+export const FILL_SWATCHES: readonly Rgba[] = [
+  [214, 219, 227, 255],
+  [56, 132, 255, 255],
+  [244, 114, 182, 255],
+  [52, 211, 153, 255],
+  [251, 191, 36, 255],
+  [248, 113, 113, 255],
+  [167, 139, 250, 255],
+];
+
+export type EditorStatus = "closed" | "loading" | "ready" | "unavailable";
+
+const EMPTY_HISTORY: HistoryView = {
+  canUndo: false,
+  canRedo: false,
+  undoable: 0,
+  redoable: 0,
+  dropped: 0,
+  undoLabel: null,
+  redoLabel: null,
+  lastLabel: null,
+};
+
+export interface EditorState {
+  status: EditorStatus;
+  /** Why the editor is unavailable (module missing, backend refused, …). */
+  error: string | null;
+  /** What just happened, shown under the canvas. */
+  note: string | null;
+  sheetId: string | null;
+  /** Canvas size in document units (sheet pixels). */
+  width: number;
+  height: number;
+  /** Every node, bottom first — the canvas draws these. */
+  nodes: NodeSpec[];
+  selection: number[];
+  history: HistoryView;
+  revision: number;
+  /** How many icons were loaded versus how many the sheet has. */
+  loadedIcons: number;
+  availableIcons: number;
+
+  /** Loads the module (once) and the listed icons as an editable document. */
+  open: (sheet: SheetDto, boxes: readonly Box4[]) => Promise<void>;
+  /** Installs an already-created session (the seam the tests use). */
+  adopt: (
+    session: EditorSession,
+    width: number,
+    height: number,
+    nodes: NodeSpec[],
+    sheetId?: string,
+  ) => void;
+  close: () => void;
+  /** Re-reads nodes, selection and history from the session. */
+  sync: () => void;
+  apply: (command: EditorCommand) => void;
+  undo: () => void;
+  redo: () => void;
+  /** A click at a document point; `additive` toggles instead of replacing. */
+  click: (x: number, y: number, additive: boolean) => void;
+  /** A completed marquee; selects everything it touched. */
+  marquee: (box: Box) => void;
+  selectAll: () => void;
+  clearSelection: () => void;
+  /** Cycles the next fill swatch onto the selection. */
+  cycleFill: () => void;
+  toggleVisible: () => void;
+  duplicate: () => void;
+  remove: () => void;
+  nudge: (dx: number, dy: number) => void;
+}
+
+/** The live session, outside React state: it is not serialisable and never rendered. */
+let session: EditorSession | null = null;
+
+/** The session the store is driving (null before `open`/`adopt`). */
+export function editorSession(): EditorSession | null {
+  return session;
+}
+
+/** Turns a traced SVG into one node's geometry (all of its paths, unioned). */
+export function nodeFromSvg(id: number, svg: string): NodeSpec | null {
+  const elements = readSvgPaths(svg);
+  const path = elements.flatMap((element) => parsePathData(element.d));
+  if (path.length === 0) return null;
+  return {
+    id,
+    m: [1, 0, 0, 1, 0, 0],
+    fill: elements.find((element) => element.fill)?.fill ?? DEFAULT_FILL,
+    visible: true,
+    path,
+  };
+}
+
+export const useEditor = create<EditorState>((set, get) => {
+  const sync = (): void => {
+    if (!session) {
+      set({ nodes: [], selection: [], history: EMPTY_HISTORY });
+      return;
+    }
+    set({
+      nodes: session.nodes(),
+      selection: session.selection(),
+      history: session.history(),
+      revision: session.revision,
+    });
+  };
+
+  /** Applies one command and reports what happened in the status line. */
+  const edit = (command: EditorCommand, describe: string): void => {
+    if (!session) return;
+    const result = session.apply(command);
+    set({ note: result.ok ? `${describe} · ${result.value} node${result.value === 1 ? "" : "s"}` : result.message });
+    sync();
+  };
+
+  const step = (direction: "undo" | "redo"): void => {
+    if (!session) return;
+    const result = direction === "undo" ? session.undo() : session.redo();
+    set({
+      note: result.ok
+        ? `${direction === "undo" ? "undid" : "redid"} ${result.value}`
+        : result.message,
+    });
+    sync();
+  };
+
+  return {
+    status: "closed",
+    error: null,
+    note: null,
+    sheetId: null,
+    width: 0,
+    height: 0,
+    nodes: [],
+    selection: [],
+    history: EMPTY_HISTORY,
+    revision: 0,
+    loadedIcons: 0,
+    availableIcons: 0,
+
+    async open(sheet, boxes) {
+      set({
+        status: "loading",
+        error: null,
+        note: "loading the editor module…",
+        sheetId: sheet.id,
+        width: sheet.width,
+        height: sheet.height,
+      });
+      try {
+        if (!session || !session.compatible) {
+          const url =
+            typeof document === "undefined"
+              ? EDITOR_MODULE_URL
+              : new URL(EDITOR_MODULE_URL, document.baseURI).href;
+          session = await EditorSession.fromUrl(url);
+        }
+        const wanted = boxes.slice(0, EDITOR_ICON_LIMIT);
+        const api = await backend();
+        const nodes: NodeSpec[] = [];
+        for (const box of wanted) {
+          const [x, y, w, h] = box;
+          const { svg } = await api.vectorizeIcon(sheet.id, x, y, w, h, EDITOR_PRESET);
+          const node = nodeFromSvg(nodes.length + 1, svg);
+          if (node) nodes.push(node);
+        }
+        if (nodes.length === 0) {
+          set({
+            status: "unavailable",
+            error: "none of the selected icons produced an outline",
+            note: null,
+          });
+          return;
+        }
+        const loaded = session.loadDocument(sheet.width, sheet.height, nodes);
+        if (!loaded.ok) {
+          set({ status: "unavailable", error: loaded.message, note: null });
+          return;
+        }
+        set({
+          status: "ready",
+          error: null,
+          note: `${nodes.length} icon${nodes.length === 1 ? "" : "s"} ready · drag to move, drag empty space to select`,
+          loadedIcons: nodes.length,
+          availableIcons: boxes.length,
+        });
+        sync();
+      } catch (cause) {
+        session = null;
+        set({
+          status: "unavailable",
+          error:
+            cause instanceof Error ? cause.message : "the editor module could not be loaded",
+          note: null,
+        });
+      }
+    },
+
+    adopt(adopted, width, height, nodes, sheetId: string | null = null) {
+      session = adopted;
+      set({
+        status: "ready",
+        error: null,
+        note: null,
+        sheetId,
+        width,
+        height,
+        loadedIcons: nodes.length,
+        availableIcons: nodes.length,
+      });
+      sync();
+    },
+
+    close() {
+      session?.close();
+      session = null;
+      set({
+        status: "closed",
+        note: null,
+        error: null,
+        nodes: [],
+        selection: [],
+        history: EMPTY_HISTORY,
+        loadedIcons: 0,
+        availableIcons: 0,
+        sheetId: null,
+      });
+    },
+
+    sync,
+    apply: (command) => edit(command, command.kind),
+    undo: () => step("undo"),
+    redo: () => step("redo"),
+
+    click(x, y, additive) {
+      if (!session) return;
+      const id = session.pick(x, y);
+      if (id === 0) {
+        if (!additive) session.clearSelection();
+        set({ note: "nothing there" });
+      } else if (additive) {
+        session.selectToggle(id);
+        set({ note: `node ${id} toggled` });
+      } else {
+        session.selectOnly(id);
+        set({ note: `node ${id} selected` });
+      }
+      sync();
+    },
+
+    marquee(box) {
+      if (!session) return;
+      const ids = session.marquee(box);
+      if (ids.length === 0) {
+        session.clearSelection();
+        set({ note: "the marquee caught nothing" });
+      } else {
+        session.selectOnly(ids[0]);
+        for (const id of ids.slice(1)) session.selectAdd(id);
+        set({ note: `${ids.length} node${ids.length === 1 ? "" : "s"} selected` });
+      }
+      sync();
+    },
+
+    selectAll() {
+      if (!session) return;
+      const count = session.selectAll();
+      set({ note: `${count} node${count === 1 ? "" : "s"} selected` });
+      sync();
+    },
+
+    clearSelection() {
+      session?.clearSelection();
+      sync();
+    },
+
+    cycleFill() {
+      if (!session) return;
+      const { selection, nodes } = get();
+      if (selection.length === 0) {
+        set({ note: "select something first" });
+        return;
+      }
+      const current = nodes.find((node) => node.id === selection[0])?.fill;
+      const index = FILL_SWATCHES.findIndex(
+        (swatch) => current !== undefined && swatch.every((channel, i) => channel === current[i]),
+      );
+      const next = FILL_SWATCHES[(index + 1) % FILL_SWATCHES.length];
+      edit({ kind: "fill", rgba: next }, "fill");
+    },
+
+    toggleVisible() {
+      if (!session) return;
+      const { selection, nodes } = get();
+      if (selection.length === 0) {
+        set({ note: "select something first" });
+        return;
+      }
+      const visible = nodes.find((node) => node.id === selection[0])?.visible ?? true;
+      edit({ kind: "visible", to: !visible }, visible ? "hide" : "show");
+    },
+
+    duplicate() {
+      edit({ kind: "duplicate", dx: 8, dy: 8 }, "duplicate");
+    },
+
+    remove() {
+      edit({ kind: "delete" }, "delete");
+    },
+
+    nudge(dx, dy) {
+      edit({ kind: "translate", dx, dy }, "move");
+    },
+  };
+});

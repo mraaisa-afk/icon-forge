@@ -3,12 +3,15 @@ import { Toolbar } from "./components/Toolbar";
 import { JobBar } from "./components/JobBar";
 import { LibraryGrid } from "./components/library/LibraryGrid";
 import { SheetPanel } from "./components/sheet/SheetPanel";
+import { EditorWorkbench } from "./components/editor/EditorWorkbench";
 import { useStore } from "./state/store";
+import { useEditor } from "./state/editorStore";
 
 export function App() {
   const project = useStore((s) => s.project);
   const selectedSheet = useStore((s) => s.selectedSheet);
   const startEventPump = useStore((s) => s.startEventPump);
+  const editorOpen = useEditor((s) => s.status !== "closed");
 
   useEffect(() => {
     startEventPump();
@@ -21,7 +24,7 @@ export function App() {
         {project ? (
           <>
             <div className="min-h-0 flex-1">
-              <LibraryGrid />
+              {editorOpen ? <EditorWorkbench /> : <LibraryGrid />}
             </div>
             {selectedSheet && <SheetPanel />}
           </>
