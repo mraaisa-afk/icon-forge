@@ -66,7 +66,7 @@ jobs:
       - name: Tests (release) — Phase 0 gate + Phase 1 exit-criteria tests
         # --nocapture: the exit-gate tests eprintln their measured
         # numbers as evidence; libtest hides passing tests' output.
-        run: cargo test --workspace --release --no-fail-fast --nocapture
+        run: cargo test --workspace --release --no-fail-fast -- --nocapture
 
       - name: Corpus regeneration consistency (truth JSONs must be byte-identical)
         shell: bash
