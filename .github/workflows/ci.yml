@@ -63,6 +63,23 @@ jobs:
       - name: Check (release, workspace)
         run: cargo check --workspace --release
 
+      # Phase 4 adds the editor: the same keystone now covers the crate that
+      # actually ships as WebAssembly.
+      - name: "Keystone: isg-core + isg-wasm compile for wasm32-unknown-unknown"
+        run: cargo check --target wasm32-unknown-unknown -p isg-core -p isg-wasm
+
+      # The Rust tests exercise the ABI through the same dispatcher, but they
+      # cannot prove the thing that ships: this builds the artifact and runs
+      # *those bytes* under Node (already installed for the frontend step), so a
+      # renamed export, a missing `memory`, or tables the host cannot see fail
+      # here instead of in a user's webview.
+      - name: "Editor ABI: build the wasm artifact and run it under Node"
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --target wasm32-unknown-unknown -p isg-wasm
+          node crates/isg-wasm/tests/wasm_smoke.mjs 2>&1 | tee target/editor-evidence.txt
+
       - name: Tests (release) — Phase 0 gate + Phase 1 exit-criteria tests
         # --nocapture: the exit-gate tests eprintln their measured
         # numbers as evidence; libtest hides passing tests' output.
@@ -99,8 +116,11 @@ jobs:
         if: always()
         shell: bash
         run: |
+          # The editor's evidence (wasm artifact, adapter frame budget) lands in
+          # its own file on the step that builds and runs the artifact.
           EVIDENCE=$(grep -hE 'evidence:|^C[0-9]+ |^W[0-9]+ |peak RSS|SSIM|GAP=' \
-            target/test-evidence.txt 2>/dev/null | head -100 || true)
+            target/test-evidence.txt target/editor-evidence.txt 2>/dev/null \
+            | head -100 || true)
           if [ -z "$EVIDENCE" ]; then
             EVIDENCE=$(tail -100 target/test-evidence.txt 2>/dev/null || true)
           fi
@@ -123,19 +143,6 @@ jobs:
             | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
             | awk '{printf "%s%%0A", $0}')
           echo "::notice title=Icon Forge evidence::${MSG}"
-
-      # Phase 4 adds the editor: the same keystone now covers the crate that
-      # actually ships as WebAssembly, and the built artifact is executed here
-      # (Node is already installed for the frontend step) so a symbol rename or
-      # a missing `memory` export cannot reach a user.
-      - name: "Keystone: isg-core + isg-wasm compile for wasm32-unknown-unknown"
-        run: cargo check --target wasm32-unknown-unknown -p isg-core -p isg-wasm
-
-      - name: "Editor ABI: build the wasm artifact and run it under Node"
-        shell: bash
-        run: |
-          cargo build --release --target wasm32-unknown-unknown -p isg-wasm
-          node crates/isg-wasm/tests/wasm_smoke.mjs
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
       # has no rustfmt, so formatting is verified here and fixed from the
@@ -170,8 +177,12 @@ jobs:
           restore-keys: |
             cargo-linux-
 
-      - name: "Keystone: isg-core + isg-wasm compile for wasm32-unknown-unknown"
-        run: cargo check --target wasm32-unknown-unknown -p isg-core -p isg-wasm
+      # Checked *and* linked here: `cargo check` alone would not notice a
+      # cdylib that builds but cannot produce a wasm artifact.
+      - name: "Keystone: isg-core + isg-wasm compile and link for wasm32-unknown-unknown"
+        run: |
+          cargo check --target wasm32-unknown-unknown -p isg-core -p isg-wasm
+          cargo build --release --target wasm32-unknown-unknown -p isg-wasm
 
       # The Tauri shell is excluded on this leg: its system webview deps
       # (webkit2gtk et al.) are not installed here, and the only shipping

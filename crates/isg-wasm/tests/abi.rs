@@ -8,9 +8,9 @@
 //! the exported `editor_call` uses).
 
 use isg_wasm::abi::{
-    self, feature, Abi, DOC_HEADER, ERR_BAD_ARGUMENT, ERR_BAD_FEATURE, ERR_DEGENERATE,
+    self, feature, Abi, ABI_VERSION, DOC_HEADER, ERR_BAD_ARGUMENT, ERR_BAD_FEATURE, ERR_DEGENERATE,
     ERR_MISSING_NODE, ERR_NO_DOCUMENT, ERR_NO_HISTORY, ERR_NO_OP, ERR_NO_SELECTION,
-    ERR_TRANSPARENT, IN_WORDS, MAX_FEATURE, NODE_RECORD_HEADER, OUT_WORDS,
+    ERR_TRANSPARENT, IN_WORDS, MAX_FEATURE, MAX_NODES, NODE_RECORD_HEADER, OUT_WORDS,
 };
 use isg_wasm::doc_blob::{decode_doc, decode_path, encode_doc, encode_path};
 use isg_wasm::editor::{Affine, Command, Doc, Node, NodeId, Point, Seg, Subpath};
@@ -208,6 +208,11 @@ fn document_blob_round_trips_bit_for_bit() {
     // Re-encoding the decoded document must produce the same words, otherwise a
     // load/edit/save cycle could drift.
     assert_eq!(encode_doc(&back), words);
+    eprintln!(
+        "evidence: editor document blob — {}-word encode, {} nodes, bit-for-bit round trip",
+        words.len(),
+        doc.node_count()
+    );
 }
 
 #[test]
@@ -281,6 +286,11 @@ fn every_documented_feature_has_an_answer() {
     assert!(!h.abi.editor().has_document());
     assert_eq!(h.call(MAX_FEATURE + 1, 0, 0), 0);
     assert_eq!(h.error(), ERR_BAD_FEATURE);
+    eprintln!(
+        "evidence: editor ABI v{ABI_VERSION} — features 0..={MAX_FEATURE} ({} of them) \
+         all answered, unknown features refused with code {ERR_BAD_FEATURE}",
+        MAX_FEATURE + 1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +590,10 @@ fn the_node_cap_is_enforced() {
     h.put(&blob, 0);
     assert_eq!(h.call(feature::DOC_LOAD, 0, 0), 0);
     assert_eq!(h.error(), abi::ERR_CAPACITY);
+    eprintln!(
+        "evidence: editor node cap {MAX_NODES} enforced on the wire (a {}-node load is refused)",
+        MAX_NODES + 1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +727,10 @@ fn property_undo_do_is_identity_over_random_sequences() {
         applied > 2000,
         "the walk must actually exercise the engine, applied {applied}"
     );
+    eprintln!(
+        "evidence: editor property (host ABI) — {applied} edits landed over 4000 \
+         randomised sequences, zero undo/redo divergences"
+    );
 }
 
 #[test]
@@ -759,6 +777,10 @@ fn property_undo_do_is_identity_through_the_module_tables() {
         h.call(feature::UNDO, 0, 0);
     }
     assert!(applied > 300, "applied {applied}");
+    eprintln!(
+        "evidence: editor property (module tables) — {applied} edits landed over 600 \
+         iterations, zero undo/redo divergences"
+    );
 }
 
 #[test]

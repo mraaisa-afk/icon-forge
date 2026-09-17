@@ -242,4 +242,11 @@ console.log(
     ? `\n${failures.length} wasm smoke failures: ${failures.join(" | ")}`
     : "\nwasm smoke: all checks green",
 );
+if (!failures.length) {
+  console.log(
+    `evidence: wasm artifact — ${bytes.length} bytes, ABI v${e.editor_abi_version()}, ` +
+      `${instance.exports.memory.buffer.byteLength >>> 20} MiB memory after the tables allocate, ` +
+      `${walk} edits walked with exact undo and redo`,
+  );
+}
 process.exit(failures.length ? 1 : 0);
