@@ -176,7 +176,11 @@ pub fn score_svg(
     // ssim 0.0029 on flat colour icons); compositing reduces that layer
     // to exactly the background (zero evidence) while ink keeps its
     // alpha-weighted colour distance.
-    let bg16 = [u16::from(bg_rgba[0]), u16::from(bg_rgba[1]), u16::from(bg_rgba[2])];
+    let bg16 = [
+        u16::from(bg_rgba[0]),
+        u16::from(bg_rgba[1]),
+        u16::from(bg_rgba[2]),
+    ];
     let render_plane: Vec<u8> = pm
         .data()
         .as_chunks::<4>()

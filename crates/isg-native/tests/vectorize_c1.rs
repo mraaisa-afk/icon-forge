@@ -70,7 +70,10 @@ const MIN_SSIM_SANITY: f32 = 0.60;
 
 fn corpus(name: &str) -> (PathBuf, PathBuf) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/corpus");
-    (dir.join(format!("{name}.png")), dir.join(format!("{name}.json")))
+    (
+        dir.join(format!("{name}.png")),
+        dir.join(format!("{name}.json")),
+    )
 }
 
 /// Per-test cache root (pid-scoped — parallel tests never share a dir).
@@ -174,18 +177,17 @@ fn c1_preset_calibration_report() {
                 id: SHEET_ID,
                 content_hash: hash_hex.to_string(),
             }),
-            &BatchOptions { preset, ..BatchOptions::default() },
+            &BatchOptions {
+                preset,
+                ..BatchOptions::default()
+            },
             &CancellationToken::new(),
             &|_, _| {},
         )
         .unwrap();
         let rows = {
             let guard = slot.lock().unwrap();
-            guard
-                .as_ref()
-                .unwrap()
-                .icons_for_sheet(&SHEET_ID)
-                .unwrap()
+            guard.as_ref().unwrap().icons_for_sheet(&SHEET_ID).unwrap()
         };
         let mean = rows.iter().map(|r| r.ssim).sum::<f32>() / rows.len() as f32;
         eprintln!(
@@ -215,7 +217,11 @@ fn c1_batch_exit_gate_1024_icons() {
     assert_eq!(s1.ok, truth.expected_groups, "successful count != truth");
     assert_eq!(s1.failed, 0, "no icon may fail stages 5-8");
     assert!(cold1 <= TIME_LIMIT, "cold batch took {cold1:?}; limit 90 s");
-    assert!(s1.peak_rss_bytes <= RSS_LIMIT, "peak RSS {} > 2 GiB budget", s1.peak_rss_bytes);
+    assert!(
+        s1.peak_rss_bytes <= RSS_LIMIT,
+        "peak RSS {} > 2 GiB budget",
+        s1.peak_rss_bytes
+    );
 
     // "0 invalid SVGs" over the persisted set, then full quality stats
     // (printed BEFORE the quality gates so CI logs always carry them).
@@ -253,9 +259,16 @@ fn c1_batch_exit_gate_1024_icons() {
         e.2 += 1;
     }
     for (sh, (sum, min, n)) in &by_shape {
-        eprintln!("C1 {sh}: n={n} mean_ssim={:.4} min_ssim={:.4}", sum / *n as f32, min);
+        eprintln!(
+            "C1 {sh}: n={n} mean_ssim={:.4} min_ssim={:.4}",
+            sum / *n as f32,
+            min
+        );
     }
-    eprintln!("C1 peak RSS: {} MiB (budget 2048)", s1.peak_rss_bytes / (1024 * 1024));
+    eprintln!(
+        "C1 peak RSS: {} MiB (budget 2048)",
+        s1.peak_rss_bytes / (1024 * 1024)
+    );
     assert!(
         mean_ssim >= MEAN_SSIM_GATE,
         "mean SSIM {mean_ssim:.4} < the 0.97 exit gate (min {}): {s1:?}",
@@ -283,8 +296,15 @@ fn c1_batch_exit_gate_1024_icons() {
     // --- Warm run 3: same cache — everything served from stage ⑧. ---
     let s3 = run(&cache_a, &slot_a, &bytes, &hash_hex);
     eprintln!("C1 warm run: {s3:?}");
-    assert_eq!(s3.cache_hits, truth.expected_groups, "warm run must be all cache hits");
+    assert_eq!(
+        s3.cache_hits, truth.expected_groups,
+        "warm run must be all cache hits"
+    );
     assert_eq!(s3.ok, truth.expected_groups);
     assert_eq!(s3.failed, 0);
-    assert_eq!(persisted(&cache_a, &slot_a), first, "cache-served SVGs byte-identical");
+    assert_eq!(
+        persisted(&cache_a, &slot_a),
+        first,
+        "cache-served SVGs byte-identical"
+    );
 }

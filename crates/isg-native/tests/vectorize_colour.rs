@@ -45,7 +45,10 @@ const MIN_SSIM_SANITY: f32 = 0.60;
 
 fn corpus(name: &str) -> (PathBuf, PathBuf) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/corpus");
-    (dir.join(format!("{name}.png")), dir.join(format!("{name}.json")))
+    (
+        dir.join(format!("{name}.png")),
+        dir.join(format!("{name}.json")),
+    )
 }
 
 fn open_project(dir: &Path, truth: &Truth, hash_hex: &str) -> (CacheStore, SharedLibrary) {
@@ -127,7 +130,10 @@ fn c8_colour_survives_balanced() {
     let (cache, slot) = open_project(&dir, &truth, &hash_hex);
     let summary = run(&cache, &slot, &bytes, &hash_hex);
     eprintln!("C8 batch: {summary:?} in {:?}", t0.elapsed());
-    assert_eq!(summary.icons, truth.expected_groups, "grouped count != truth");
+    assert_eq!(
+        summary.icons, truth.expected_groups,
+        "grouped count != truth"
+    );
     assert_eq!(summary.ok, truth.expected_groups);
     assert_eq!(summary.failed, 0);
 
@@ -142,21 +148,35 @@ fn c8_colour_survives_balanced() {
         "C8 quality: mean_ssim={mean_ssim:.4} min_ssim={min_ssim:.4} min_distinct_fills={min_distinct}"
     );
     for icon in &icons {
-        eprintln!("C8 icon at {:?}: distinct={} ssim={:.4}", icon.bbox, icon.distinct, icon.ssim);
+        eprintln!(
+            "C8 icon at {:?}: distinct={} ssim={:.4}",
+            icon.bbox, icon.distinct, icon.ssim
+        );
     }
     assert!(
         mean_ssim >= MEAN_SSIM_FLOOR,
         "mean SSIM {mean_ssim:.4} < the 0.90 colour floor: {summary:?}"
     );
     for icon in &icons {
-        assert!(icon.distinct >= 2, "icon {icon:?} collapsed to {} fill(s)", icon.distinct);
-        assert!(icon.ssim >= MIN_SSIM_SANITY, "icon {icon:?} SSIM {} below sanity", icon.ssim);
+        assert!(
+            icon.distinct >= 2,
+            "icon {icon:?} collapsed to {} fill(s)",
+            icon.distinct
+        );
+        assert!(
+            icon.ssim >= MIN_SSIM_SANITY,
+            "icon {icon:?} SSIM {} below sanity",
+            icon.ssim
+        );
     }
 
     // Determinism rides along here too: same bytes, same SVGs.
     let again = audited(&cache, &slot);
     let warm = run(&cache, &slot, &bytes, &hash_hex);
     eprintln!("C8 warm run: {warm:?}");
-    assert_eq!(warm.cache_hits, truth.expected_groups, "warm run must be all cache hits");
+    assert_eq!(
+        warm.cache_hits, truth.expected_groups,
+        "warm run must be all cache hits"
+    );
     assert_eq!(again, icons, "cache-served SVGs must be byte-identical");
 }
