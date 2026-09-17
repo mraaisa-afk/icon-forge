@@ -19,7 +19,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use isg_core::{GroupingStrategy, TracePreset};
+use isg_core::{GroupingStrategy, RasterView, TracePreset};
 use rayon::prelude::*;
 
 use crate::cache::CacheStore;
@@ -29,6 +29,7 @@ use crate::rss::{current_rss_bytes, RssWatcher};
 
 use super::background::BackgroundModel;
 use super::group::RleCclGrouper;
+use super::merge::{refine_groups_with_stats, RefineParams};
 use super::raster::SheetRaster;
 use super::score::{vectorize_cache_key, vectorize_scored, ScoredIcon, VectorizeError};
 use super::{segment, SegParams};
@@ -49,6 +50,10 @@ pub struct BatchOptions {
     pub max_dim: u32,
     /// Grouping speckle filter (minimum component area).
     pub min_area: u32,
+    /// §3.4 F4 (noise) + F1 (merge) refine stage. Disabled by default until
+    /// the corpus is calibrated (W12), so the Phase 0–2 gates keep measuring
+    /// raw CCL output.
+    pub refine: RefineParams,
 }
 
 impl Default for BatchOptions {
@@ -58,6 +63,7 @@ impl Default for BatchOptions {
             seg: SegParams::default(),
             max_dim: 4096,
             min_area: 16,
+            refine: RefineParams::default(),
         }
     }
 }
@@ -198,10 +204,19 @@ pub fn vectorize_sheet_batch(
         return Err(BatchError::NoProject);
     }
     let out = segment(bytes, opts.max_dim, &opts.seg).map_err(BatchError::Segment)?;
-    let groups = RleCclGrouper {
+    let raw_groups = RleCclGrouper {
         min_area: opts.min_area,
     }
     .group_all(&out.sheet, &out.mask);
+    // §3.4 F4 (noise) + F1 (merge). `RefineParams::default()` is disabled, so
+    // this is a pass-through until W12 calibrates it against the corpus; the
+    // returned stats then feed the confidence score and audit trail.
+    let (groups, _refine) = refine_groups_with_stats(
+        raw_groups,
+        out.sheet.width(),
+        out.sheet.height(),
+        &opts.refine,
+    );
     let total = groups.len() as u64;
     progress(0, total);
 

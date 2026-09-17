@@ -88,8 +88,9 @@ struct CclStats {
 }
 
 /// Canonical output order: top-to-bottom, left-to-right, then the scanned
-/// member pixel. Shared so the two groupers cannot drift apart.
-fn sort_groups(groups: &mut [IconGroup]) {
+/// member pixel. Shared so the two groupers (and the W8 refine stage) cannot
+/// drift apart.
+pub(crate) fn sort_groups(groups: &mut [IconGroup]) {
     groups.sort_by(|a, b| {
         a.bbox
             .y

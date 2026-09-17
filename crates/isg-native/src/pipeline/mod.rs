@@ -12,6 +12,7 @@ pub mod batch;
 pub mod clean;
 pub mod emit;
 pub mod group;
+pub mod merge;
 pub mod normalize;
 pub mod profiles;
 pub mod quantize;
@@ -31,6 +32,9 @@ pub use batch::{
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
 pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
 pub use group::{CclGrouper, RleCclGrouper};
+pub use merge::{
+    refine_groups, refine_groups_with_stats, RefineParams, RefineStats, REFINE_VERSION,
+};
 pub use normalize::normalize;
 pub use profiles::{profile, TraceProfile};
 pub use quantize::{Layer, QuantizeParams};
