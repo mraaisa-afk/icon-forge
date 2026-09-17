@@ -1,0 +1,16 @@
+[package]
+name = "isg-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM ABI + host glue for the Icon Forge SVG editor"
+
+# ARCHITECTURE.md §1.2 makes this crate the interactive half of the editor: it
+# compiles to wasm32-unknown-unknown and runs the edit loop inside the webview,
+# so per-frame work never crosses the IPC boundary (§2 golden rule).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+isg-core = { workspace = true }

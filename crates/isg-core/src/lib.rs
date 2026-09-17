@@ -42,6 +42,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod editor;
 pub mod mask;
 pub mod prelude;
 

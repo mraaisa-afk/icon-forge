@@ -124,8 +124,18 @@ jobs:
             | awk '{printf "%s%%0A", $0}')
           echo "::notice title=Icon Forge evidence::${MSG}"
 
-      - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
-        run: cargo check --target wasm32-unknown-unknown -p isg-core
+      # Phase 4 adds the editor: the same keystone now covers the crate that
+      # actually ships as WebAssembly, and the built artifact is executed here
+      # (Node is already installed for the frontend step) so a symbol rename or
+      # a missing `memory` export cannot reach a user.
+      - name: "Keystone: isg-core + isg-wasm compile for wasm32-unknown-unknown"
+        run: cargo check --target wasm32-unknown-unknown -p isg-core -p isg-wasm
+
+      - name: "Editor ABI: build the wasm artifact and run it under Node"
+        shell: bash
+        run: |
+          cargo build --release --target wasm32-unknown-unknown -p isg-wasm
+          node crates/isg-wasm/tests/wasm_smoke.mjs
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
       # has no rustfmt, so formatting is verified here and fixed from the
@@ -160,14 +170,14 @@ jobs:
           restore-keys: |
             cargo-linux-
 
-      - name: "Keystone: isg-core compiles for wasm32-unknown-unknown"
-        run: cargo check --target wasm32-unknown-unknown -p isg-core
+      - name: "Keystone: isg-core + isg-wasm compile for wasm32-unknown-unknown"
+        run: cargo check --target wasm32-unknown-unknown -p isg-core -p isg-wasm
 
       # The Tauri shell is excluded on this leg: its system webview deps
       # (webkit2gtk et al.) are not installed here, and the only shipping
       # platform is Windows. Every other workspace crate must be clean.
       - name: Check all non-Tauri crates
-        run: cargo check -p isg-core -p isg-native -p isg-spike-groupall -p isg-gen-corpus
+        run: cargo check -p isg-core -p isg-wasm -p isg-native -p isg-spike-groupall -p isg-gen-corpus
 
       # Lives on this leg because cargo-deny-action is a container action
       # (Linux-only on GitHub runners). Policy identical on every platform:

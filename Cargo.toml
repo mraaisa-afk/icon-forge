@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/isg-core",
     "crates/isg-native",
+    "crates/isg-wasm",
     "spike/groupall",
     "tools/gen-corpus",
     "src-tauri",
