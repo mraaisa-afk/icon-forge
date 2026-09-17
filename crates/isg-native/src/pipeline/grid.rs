@@ -80,11 +80,12 @@ pub struct GridHint {
     pub cells_x: u32,
     /// Cells along y when `grid_y`.
     pub cells_y: u32,
-    /// `1 − MAD/median` of the column pitch.
+    /// Measured `1 − MAD/median` of the column pitch (reported whether or not
+    /// the axis cleared `regularity_min`).
     pub regularity_x: f32,
-    /// `1 − MAD/median` of the row pitch.
+    /// Measured `1 − MAD/median` of the row pitch.
     pub regularity_y: f32,
-    /// Column valley centres, ascending.
+    /// Column valley centres, ascending (empty only when the axis has none).
     pub valley_x: Vec<u32>,
     /// Row valley centres, ascending.
     pub valley_y: Vec<u32>,
@@ -183,10 +184,13 @@ pub fn detect_grid(mask: &ForegroundMask, params: &GridParams, stats: &mut GridS
         grid_y,
         cells_x: if grid_x { valley_x.len() as u32 + 1 } else { 0 },
         cells_y: if grid_y { valley_y.len() as u32 + 1 } else { 0 },
-        regularity_x: if grid_x { regularity_x } else { 0.0 },
-        regularity_y: if grid_y { regularity_y } else { 0.0 },
-        valley_x: if grid_x { valley_x } else { Vec::new() },
-        valley_y: if grid_y { valley_y } else { Vec::new() },
+        // The measurement is reported even for an axis that did not clear
+        // `regularity_min`: W11's weak-grid signal *is* that number, and every
+        // valley use in `classify` is gated on `grid_x`/`grid_y` anyway.
+        regularity_x,
+        regularity_y,
+        valley_x,
+        valley_y,
     }
 }
 

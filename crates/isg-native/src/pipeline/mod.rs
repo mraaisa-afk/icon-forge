@@ -10,10 +10,12 @@
 pub mod background;
 pub mod batch;
 pub mod clean;
+pub mod confidence;
 pub mod containment;
 pub mod emit;
 pub mod grid;
 pub mod group;
+pub mod maskcache;
 pub mod merge;
 pub mod normalize;
 pub mod profiles;
@@ -33,6 +35,10 @@ pub use batch::{
     vectorize_sheet_batch, BatchError, BatchOptions, BatchSummary, SharedLibrary, SheetRef,
 };
 pub use clean::{clean, close3, dilate3, erode3, median3, open3};
+pub use confidence::{
+    score_groups, summary_line, ConfidenceParams, ConfidenceReport, ConfidenceSignals,
+    GroupWarning, ScoreInput, SignalKind, WarningKind, CONFIDENCE_VERSION, SIGNAL_COUNT,
+};
 pub use containment::{
     build_containment, Containment, ContainmentForest, ContainmentParams, ContainmentStats,
     CONTAINMENT_VERSION,
@@ -40,8 +46,13 @@ pub use containment::{
 pub use emit::{emit_svg, validate, EmitError, CACHE_VERSION};
 pub use grid::{detect_grid, GridFit, GridHint, GridParams, GridStats, GRID_VERSION};
 pub use group::{CclGrouper, RleCclGrouper};
+pub use maskcache::{
+    mask_key, mask_key_from_hash, regroup_cached, sheet_hash, CachedMask, MaskCache,
+    RegroupOutcome, MASKCACHE_VERSION,
+};
 pub use merge::{
-    refine_groups, refine_groups_with_stats, RefineParams, RefineStats, REFINE_VERSION,
+    refine_groups, refine_groups_with_context, refine_groups_with_stats, RefineParams, RefineStats,
+    REFINE_VERSION,
 };
 pub use normalize::normalize;
 pub use profiles::{profile, TraceProfile};
@@ -76,6 +87,26 @@ pub fn segment(bytes: &[u8], max_dim: u32, params: &SegParams) -> Result<SegOutp
         mask,
         background,
     })
+}
+
+/// Stages ①–③ behind the §3.4 mask cache (the sensitivity-slider path).
+///
+/// A warm hit performs **no decode and no segmentation at all** — the returned
+/// mask and background come straight from the cache — while a miss runs
+/// [`segment`] and stores the result. The returned flag is `true` on a hit.
+pub fn mask_cached(
+    bytes: &[u8],
+    max_dim: u32,
+    params: &SegParams,
+    cache: &mut MaskCache,
+) -> Result<(ForegroundMask, BackgroundModel, bool), IsgError> {
+    let key = maskcache::mask_key(bytes, params);
+    if let Some(entry) = cache.get(&key) {
+        return Ok((entry.mask(), entry.background, true));
+    }
+    let out = segment(bytes, max_dim, params)?;
+    cache.put(&key, &out.mask, &out.background);
+    Ok((out.mask, out.background, false))
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use crate::rss::{current_rss_bytes, RssWatcher};
 
 use super::background::BackgroundModel;
 use super::group::RleCclGrouper;
-use super::merge::{refine_groups_with_stats, RefineParams};
+use super::merge::{refine_groups_with_context, RefineParams};
 use super::raster::SheetRaster;
 use super::score::{vectorize_cache_key, vectorize_scored, ScoredIcon, VectorizeError};
 use super::{segment, SegParams};
@@ -208,10 +208,12 @@ pub fn vectorize_sheet_batch(
         min_area: opts.min_area,
     }
     .group_all(&out.sheet, &out.mask);
-    // §3.4 F4 (noise) + F1 (merge). `RefineParams::default()` is disabled, so
-    // this is a pass-through until W12 calibrates it against the corpus; the
-    // returned stats then feed the confidence score and audit trail.
-    let (groups, _refine) = refine_groups_with_stats(raw_groups, &out.mask, &opts.refine);
+    // §3.4 F4/F1/F2/F5/F3 + the confidence score. `RefineParams::default()` is
+    // disabled, so this is a pass-through until W12 calibrates it against the
+    // corpus; the returned stats then feed the UI and the audit trail. The
+    // background model goes in so the score can see which detector won.
+    let (groups, _refine) =
+        refine_groups_with_context(raw_groups, &out.mask, Some(&out.background), &opts.refine);
     let total = groups.len() as u64;
     progress(0, total);
 

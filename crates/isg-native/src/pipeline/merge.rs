@@ -44,8 +44,10 @@ use std::collections::HashMap;
 
 use isg_core::{Bbox, ForegroundMask, IconGroup};
 
+use super::background::BackgroundModel;
+use super::confidence::{score_groups, ConfidenceParams, ConfidenceReport, ScoreInput};
 use super::containment::{build_containment, ContainmentParams, ContainmentStats};
-use super::grid::{classify, detect_grid, GridFit, GridParams, GridStats};
+use super::grid::{classify, detect_grid, GridFit, GridHint, GridParams, GridStats};
 use super::group::sort_groups;
 use super::split::{resplit_forced, split_overmerged, SplitParams, SplitStats};
 
@@ -70,6 +72,8 @@ pub struct RefineParams {
     pub grid: GridParams,
     /// F3 hole/containment forest (W10).
     pub containment: ContainmentParams,
+    /// §3.4 confidence scoring (W11) — reads the F5/F1/F3 evidence above.
+    pub confidence: ConfidenceParams,
     /// F4 speckle: drop components with `area < noise_min_area`.
     pub noise_min_area: u32,
     /// F4 sliver: drop components with `min(w, h) < noise_min_dim`.
@@ -118,6 +122,7 @@ impl Default for RefineParams {
             split: SplitParams::default(),
             grid: GridParams::default(),
             containment: ContainmentParams::default(),
+            confidence: ConfidenceParams::default(),
             noise_min_area: 16,
             noise_min_dim: 3,
             noise_max_aspect: 60.0,
@@ -140,7 +145,7 @@ impl Default for RefineParams {
 }
 
 /// What the F1 pass did, for evidence logs and (later) the confidence score.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RefineStats {
     /// Components handed in.
     pub input: u32,
@@ -174,7 +179,9 @@ pub struct RefineStats {
     pub grid: GridStats,
     /// F3 containment counters (W10).
     pub containment: ContainmentStats,
-    /// Wall-clock for F4 + F1 + F2 + F5 + F3, in milliseconds.
+    /// §3.4 confidence score, its signals and the review list (W11).
+    pub confidence: ConfidenceReport,
+    /// Wall-clock for F4 + F1 + F2 + F5 + F3 + confidence, in milliseconds.
     pub elapsed_ms: f32,
 }
 
@@ -541,11 +548,25 @@ pub fn refine_groups(
     refine_groups_with_stats(groups, mask, params).0
 }
 
-/// [`refine_groups`] plus the evidence counters.
+/// [`refine_groups`] plus the evidence counters, without the background model —
+/// the §3.4 uncertain-background signal stays at 0 (see
+/// [`refine_groups_with_context`] for the full call the app makes).
 #[must_use]
 pub fn refine_groups_with_stats(
     groups: Vec<IconGroup>,
     mask: &ForegroundMask,
+    params: &RefineParams,
+) -> (Vec<IconGroup>, RefineStats) {
+    refine_groups_with_context(groups, mask, None, params)
+}
+
+/// [`refine_groups_with_stats`] with the detected background model, so the
+/// confidence score can see which detector won and with what agreement.
+#[must_use]
+pub fn refine_groups_with_context(
+    groups: Vec<IconGroup>,
+    mask: &ForegroundMask,
+    background: Option<&BackgroundModel>,
     params: &RefineParams,
 ) -> (Vec<IconGroup>, RefineStats) {
     let sheet_w = mask.width();
@@ -612,51 +633,62 @@ pub fn refine_groups_with_stats(
     // F5 (W10): a regular lattice turns F1's merges that crossed a valley into
     // provable merges — they are handed back to the watershed with the size
     // gate skipped, because the hint *is* the evidence the gate stood in for.
-    if params.grid.enabled && !current.is_empty() && median_h > 0.0 {
-        let hint = detect_grid(mask, &params.grid, &mut stats.grid);
-        if hint.any() {
-            let min_area =
-                f64::from(params.grid.min_cells_to_resplit * median_h * median_h).round() as u64;
-            let mut eligible: Vec<bool> = vec![false; current.len()];
-            for (i, g) in current.iter().enumerate() {
-                if matches!(
-                    classify(&g.bbox, &hint, params.grid.span_tolerance),
-                    GridFit::SpansMultipleCells { .. }
-                ) {
-                    stats.grid.flagged += 1;
-                    if g.bbox.area() >= min_area {
-                        eligible[i] = true;
-                    }
+    // The hint is measured whenever either consumer needs it; F5 acts on it and
+    // the confidence score reports it (a disabled F5 must not blind the score).
+    // Originals F5 handed back from provably wrong merges — reported as review
+    // items (they are where the grouping wanted to glue) without a deduction.
+    let mut restored_originals: Vec<IconGroup> = Vec::new();
+    let hint = if (params.grid.enabled || params.confidence.enabled)
+        && !current.is_empty()
+        && median_h > 0.0
+    {
+        detect_grid(mask, &params.grid, &mut stats.grid)
+    } else {
+        GridHint::default()
+    };
+    if params.grid.enabled && hint.any() {
+        let min_area =
+            f64::from(params.grid.min_cells_to_resplit * median_h * median_h).round() as u64;
+        let mut eligible: Vec<bool> = vec![false; current.len()];
+        for (i, g) in current.iter().enumerate() {
+            if matches!(
+                classify(&g.bbox, &hint, params.grid.span_tolerance),
+                GridFit::SpansMultipleCells { .. }
+            ) {
+                stats.grid.flagged += 1;
+                if g.bbox.area() >= min_area {
+                    eligible[i] = true;
                 }
             }
-            let mut keep: Vec<IconGroup> = Vec::with_capacity(current.len());
-            let mut restored: Vec<IconGroup> = Vec::new();
-            let mut glue: Vec<IconGroup> = Vec::new();
-            for (i, g) in current.iter().enumerate() {
-                if !eligible[i] {
-                    keep.push(*g);
-                    continue;
-                }
-                if members.get(i).is_some_and(|m| m.len() >= 2) {
-                    // A proximity merge: the hint proves it crossed a valley, so
-                    // the original components come back verbatim.
-                    stats.grid.restored += 1;
-                    restored.extend(members[i].iter().copied());
-                } else if glue.len() < params.grid.max_resplit as usize {
-                    glue.push(*g);
-                }
+        }
+        let mut keep: Vec<IconGroup> = Vec::with_capacity(current.len());
+        let mut restored: Vec<IconGroup> = Vec::new();
+        let mut glue: Vec<IconGroup> = Vec::new();
+        for (i, g) in current.iter().enumerate() {
+            if !eligible[i] {
+                keep.push(*g);
+                continue;
             }
-            if !restored.is_empty() || !glue.is_empty() {
-                stats.grid.resplit_candidates = glue.len() as u32 + stats.grid.restored;
-                let (rest, split, regions) =
-                    resplit_forced(glue, mask, median_h, &params.split, &mut stats.split);
-                keep.extend(restored);
-                keep.extend(rest);
-                sort_groups(&mut keep);
-                current = keep;
-                stats.grid.resplit = split;
-                stats.grid.regions = regions;
+            if members.get(i).is_some_and(|m| m.len() >= 2) {
+                // A proximity merge: the hint proves it crossed a valley, so
+                // the original components come back verbatim.
+                stats.grid.restored += 1;
+                restored_originals.extend(members[i].iter().copied());
+                restored.extend(members[i].iter().copied());
+            } else if glue.len() < params.grid.max_resplit as usize {
+                glue.push(*g);
             }
+        }
+        if !restored.is_empty() || !glue.is_empty() {
+            stats.grid.resplit_candidates = glue.len() as u32 + stats.grid.restored;
+            let (rest, split, regions) =
+                resplit_forced(glue, mask, median_h, &params.split, &mut stats.split);
+            keep.extend(restored);
+            keep.extend(rest);
+            sort_groups(&mut keep);
+            current = keep;
+            stats.grid.resplit = split;
+            stats.grid.regions = regions;
         }
     }
 
@@ -668,6 +700,24 @@ pub fn refine_groups_with_stats(
     if params.containment.enabled && !current.is_empty() {
         let _forest =
             build_containment(&current, mask, &params.containment, &mut stats.containment);
+    }
+
+    // W11: §3.4 confidence over everything the chain above measured.
+    if params.confidence.enabled && !current.is_empty() {
+        // F1 merges that survived F5's provenance undo: those are the ones the
+        // user is actually looking at.
+        let surviving_merges = stats.merges.saturating_sub(stats.grid.restored);
+        stats.confidence = score_groups(
+            ScoreInput {
+                groups: &current,
+                mask,
+                merges: surviving_merges,
+                restored: &restored_originals,
+                hint: &hint,
+                background,
+            },
+            &params.confidence,
+        );
     }
     stats.elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
     (current, stats)
