@@ -134,6 +134,61 @@ fn persisted(cache: &CacheStore, slot: &SharedLibrary) -> Vec<Persisted> {
         .collect()
 }
 
+/// Diagnostic for the SSIM gate: cold-batch mean SSIM per preset over
+/// the same sheet. Reports only — the enforcement lives in
+/// `c1_batch_exit_gate_1024_icons`; this exists so preset choices are
+/// made from CI-measured evidence, not guesses.
+#[test]
+fn c1_preset_calibration_report() {
+    let (png, json) = corpus("11_c1_batch_grid");
+    let bytes = fs::read(png).expect("corpus sheet 11_c1_batch_grid.png exists");
+    let truth: Truth =
+        serde_json::from_slice(&fs::read(json).expect("corpus truth json exists")).unwrap();
+    let hash_hex = blake3::hash(&bytes).to_hex().to_string();
+    for preset in [
+        TracePreset::Draft,
+        TracePreset::Lineart,
+        TracePreset::Detailed,
+        TracePreset::HighFidelity,
+        TracePreset::Pixel,
+    ] {
+        let dir = std::env::temp_dir().join(format!(
+            "isg-c1-cal-{}-{}",
+            preset.ordinal(),
+            std::process::id()
+        ));
+        let (cache, slot) = open_project(&dir, &truth, &hash_hex);
+        let t0 = Instant::now();
+        let summary = vectorize_sheet_batch(
+            &bytes,
+            &cache,
+            &slot,
+            Some(SheetRef {
+                id: SHEET_ID,
+                content_hash: hash_hex.to_string(),
+            }),
+            &BatchOptions { preset, ..BatchOptions::default() },
+            &CancellationToken::new(),
+            &|_, _| {},
+        )
+        .unwrap();
+        let rows = {
+            let guard = slot.lock().unwrap();
+            guard
+                .as_ref()
+                .unwrap()
+                .icons_for_sheet(&SHEET_ID)
+                .unwrap()
+        };
+        let mean = rows.iter().map(|r| r.ssim).sum::<f32>() / rows.len() as f32;
+        eprintln!(
+            "C1 cal {preset:?}: mean_ssim={mean:.4} min_ssim={:.4} in {:?}",
+            summary.min_ssim,
+            t0.elapsed()
+        );
+    }
+}
+
 #[test]
 fn c1_batch_exit_gate_1024_icons() {
     let (png, json) = corpus("11_c1_batch_grid");
