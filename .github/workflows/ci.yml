@@ -124,12 +124,18 @@ jobs:
         if: always()
         shell: bash
         run: |
-          # The editor's evidence (wasm artifact, adapter frame budget, and the
-          # 4A property walks) is gathered across both files: the phase under
-          # review must not be pushed out of the notice by an older phase.
-          EDITOR=$(grep -hE 'evidence: (editor|wasm artifact)|^ok |^FAIL ' \
+          # The editor's evidence is gathered across both files, so the phase
+          # under review is never pushed out of the summary by an older one,
+          # and split by who produced it: the artifact lines come from running
+          # the built module under Node, the adapter lines from the TypeScript
+          # suite (frame budget, property walks) and the host-side ABI tests.
+          # They get two notices because one ~4 KiB body cannot hold both
+          # without cutting the last line mid-sentence.
+          ARTIFACT=$(grep -hE '^ok |^FAIL |evidence: wasm artifact' \
+            target/editor-evidence.txt 2>/dev/null | head -60 || true)
+          ADAPTER=$(grep -hE 'evidence: editor' \
             target/editor-evidence.txt target/test-evidence.txt 2>/dev/null \
-            | head -80 || true)
+            | head -40 || true)
           EVIDENCE=$(grep -hE 'evidence:|^C[0-9]+ |^W[0-9]+ |peak RSS|SSIM|GAP=' \
             target/test-evidence.txt 2>/dev/null | head -100 || true)
           if [ -z "$EVIDENCE" ]; then
@@ -138,7 +144,8 @@ jobs:
           {
             echo "## Evidence (run-produced)"
             echo '```text'
-            printf '%s\n' "$EDITOR"
+            printf '%s\n' "$ARTIFACT"
+            printf '%s\n' "$ADAPTER"
             printf '%s\n' "$EVIDENCE"
             echo '```'
             echo '```json'
@@ -161,7 +168,8 @@ jobs:
               | awk '{printf "%s%%0A", $0}')
             echo "::notice title=$1::${body}"
           }
-          announce "Icon Forge editor evidence" "$EDITOR"
+          announce "Icon Forge editor artifact evidence" "$ARTIFACT"
+          announce "Icon Forge editor adapter evidence" "$ADAPTER"
           announce "Icon Forge evidence" "$EVIDENCE"
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
