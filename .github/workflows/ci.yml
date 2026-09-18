@@ -124,17 +124,21 @@ jobs:
         if: always()
         shell: bash
         run: |
-          # The editor's evidence (wasm artifact, adapter frame budget) lands in
-          # its own file on the step that builds and runs the artifact.
+          # The editor's evidence (wasm artifact, adapter frame budget, and the
+          # 4A property walks) is gathered across both files: the phase under
+          # review must not be pushed out of the notice by an older phase.
+          EDITOR=$(grep -hE 'evidence: (editor|wasm artifact)|^ok |^FAIL ' \
+            target/editor-evidence.txt target/test-evidence.txt 2>/dev/null \
+            | head -80 || true)
           EVIDENCE=$(grep -hE 'evidence:|^C[0-9]+ |^W[0-9]+ |peak RSS|SSIM|GAP=' \
-            target/test-evidence.txt target/editor-evidence.txt 2>/dev/null \
-            | head -100 || true)
+            target/test-evidence.txt 2>/dev/null | head -100 || true)
           if [ -z "$EVIDENCE" ]; then
             EVIDENCE=$(tail -100 target/test-evidence.txt 2>/dev/null || true)
           fi
           {
             echo "## Evidence (run-produced)"
             echo '```text'
+            printf '%s\n' "$EDITOR"
             printf '%s\n' "$EVIDENCE"
             echo '```'
             echo '```json'
@@ -144,13 +148,21 @@ jobs:
 
           # A job's markdown summary is NOT exposed through the GitHub API
           # (the job's check-run `output.summary` stays null), but annotations
-          # are. So the same block is republished as one notice annotation,
-          # which a network-isolated reviewer can read with:
+          # are. A network-isolated reviewer reads them with:
           #   gh api /repos/<owner>/<repo>/check-runs/<job_id>/annotations
-          MSG=$(printf '%s' "$EVIDENCE" | head -c 60000 \
-            | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
-            | awk '{printf "%s%%0A", $0}')
-          echo "::notice title=Icon Forge evidence::${MSG}"
+          # A workflow-command notice is truncated at roughly 4 KiB, so each
+          # phase gets its own notice rather than sharing one: the editor
+          # numbers went missing the first time because a truncated line ate
+          # them.
+          announce() {
+            local body
+            body=$(printf '%s' "$2" | head -c 3600 \
+              | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
+              | awk '{printf "%s%%0A", $0}')
+            echo "::notice title=$1::${body}"
+          }
+          announce "Icon Forge editor evidence" "$EDITOR"
+          announce "Icon Forge evidence" "$EVIDENCE"
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
       # has no rustfmt, so formatting is verified here and fixed from the
