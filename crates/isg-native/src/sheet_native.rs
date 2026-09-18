@@ -287,8 +287,17 @@ mod tests {
         );
         // …and the margin is transparent, because no background was asked for.
         assert_eq!(pixel(&raster, 2, 2)[3], 0);
-        // The icon's own cell is where the ink is: one pixel outside it is not.
-        assert_eq!(pixel(&raster, 20, 40)[3], 0);
+        // The icon's own cell is where the ink is: the padding is empty, the
+        // ink's interior is solid, and the pixel that straddles the ink box's
+        // edge is *partially* covered — a real renderer antialiases, so the
+        // first pixel of the box is a fraction, not a hard step.
+        assert_eq!(pixel(&raster, 17, 40)[3], 0, "the padding is empty");
+        assert_eq!(pixel(&raster, 40, 40)[3], 255, "the ink is solid");
+        let edge = pixel(&raster, 20, 40)[3];
+        assert!(
+            edge > 0 && edge < 255,
+            "the ink box's edge is antialiased, got alpha {edge}"
+        );
         // The document that was rendered is the one the exporter wrote.
         let again = write_sheet_svg(&plan, &art, &SvgOptions::default());
         assert_eq!(Ok(raster.document.clone()), again);
@@ -315,8 +324,9 @@ mod tests {
         );
         // The engine's reader, too.
         engine_svg::parse(&raster.document).expect("the engine accepts the sheet");
-        // With a background, no pixel is transparent anywhere.
-        for (x, y) in [(2, 2), (40, 40), (150, 150)] {
+        // With a background, no pixel is transparent anywhere — two icons over
+        // two columns are 152 × 80 px, so the far corner is (150, 78).
+        for (x, y) in [(2, 2), (40, 40), (150, 78)] {
             assert_eq!(pixel(&raster, x, y)[3], 255, "pixel {x},{y}");
         }
         assert_eq!(pixel(&raster, 2, 2), [255, 255, 255, 255]);

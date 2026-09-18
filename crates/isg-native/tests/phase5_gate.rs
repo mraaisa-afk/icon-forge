@@ -180,7 +180,7 @@ fn f1_a_thousand_icons_level_to_one_size() {
     // Two more sheets, reported for context rather than asserted (they are
     // deliberately hostile: 07 mixes stroke weights, 03 is rings and holes).
     let mut context = Vec::new();
-    for name in ["12_c2_latency_grid", "03_rings_holes", "07_stroke_mix"] {
+    for name in ["12_c2_latency_grid", "03_rings_holes", "07_size_range"] {
         let (mask, groups) = grouped(name, &seg);
         let plan = SheetPlan::new(&icons_from(&mask, &groups), spec);
         context.push(format!(
@@ -502,15 +502,20 @@ fn f4_the_exports_are_conservative_documents() {
             "the sheet SVG must not contain {forbidden}"
         );
     }
-    // Every element it contains is one every renderer knows.
+    // Every element it contains is one every renderer knows. The XML
+    // declaration (`<?xml …?>`) and any comment are not elements; a closing tag
+    // is checked as the element it closes.
     for chunk in svg.split('<').skip(1) {
+        let chunk = chunk.strip_prefix('/').unwrap_or(chunk);
+        if chunk.starts_with('?') || chunk.starts_with('!') {
+            continue;
+        }
         let name: String = chunk
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric())
             .collect();
         assert!(
-            ["svg", "title", "desc", "metadata", "rect", "g", "path", "/svg", "/g", "/title"]
-                .contains(&name.as_str()),
+            ["svg", "title", "desc", "metadata", "rect", "g", "path"].contains(&name.as_str()),
             "unexpected element <{name}"
         );
     }
