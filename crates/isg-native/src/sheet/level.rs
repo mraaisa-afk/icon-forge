@@ -139,7 +139,10 @@ pub struct LevelReport {
     pub ink_size_cv: f32,
     /// CV of the icons' stroke weights as measured — how uneven the input was.
     pub stroke_cv: f32,
-    /// Spread of the placed ink boxes' bottom edges, in pixels.
+    /// Spread of the placed ink boxes' bottom edges, in pixels — the *worst
+    /// row*, not the whole sheet. With `Placement::Baseline` the ink of every
+    /// icon in a row shares a bottom edge, so this is the number that proves
+    /// it; across many rows the sheet's own height would swamp it.
     pub baseline_spread: f32,
     /// The stroke weight the sheet was leveled against.
     pub median_stroke: f32,
@@ -168,6 +171,11 @@ pub fn place(
     let mut placements = Vec::with_capacity(icons.len());
     let mut sizes = Vec::with_capacity(icons.len());
     let mut strokes = Vec::with_capacity(icons.len());
+    // Per-row bottom edges, so the baseline spread is a property of a row (see
+    // `LevelReport::baseline_spread`).
+    let rows = layout.rows as usize;
+    let mut row_low = vec![f32::INFINITY; rows];
+    let mut row_high = vec![f32::NEG_INFINITY; rows];
     let mut stroke_clamped = 0usize;
     let mut solidity_clamped = 0usize;
     let mut overflow_backoffs = 0usize;
@@ -248,6 +256,13 @@ pub fn place(
 
         sizes.push(scale * m.ink_long_side());
         strokes.push(m.stroke);
+        if layout.columns > 0 && rows > 0 {
+            let row = index / layout.columns as usize;
+            if let (Some(low), Some(high)) = (row_low.get_mut(row), row_high.get_mut(row)) {
+                *low = low.min(ink_y + placed_h);
+                *high = high.max(ink_y + placed_h);
+            }
+        }
         placements.push(IconPlacement {
             id: icon.id,
             cell: (cell_x, cell_y),
@@ -267,13 +282,12 @@ pub fn place(
         icons: icons.len(),
         ink_size_cv: cv(&sizes),
         stroke_cv: cv(&strokes),
-        baseline_spread: spread(
-            placements
-                .iter()
-                .map(|p| p.ink.bottom())
-                .collect::<Vec<_>>()
-                .as_slice(),
-        ),
+        baseline_spread: row_low
+            .iter()
+            .zip(row_high.iter())
+            .filter(|(low, high)| low.is_finite() && high.is_finite())
+            .map(|(low, high)| high - low)
+            .fold(0.0f32, f32::max),
         median_stroke,
         median_solidity,
         overflow_backoffs,
@@ -552,6 +566,40 @@ mod tests {
         }
         // …and both are square, so the shared baseline is the same both ways.
         assert!((p[0].ink.h - p[0].ink.w).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_baseline_spread_is_the_worst_row_not_the_whole_sheet() {
+        // Eight icons over two columns, alternating scale: without baseline
+        // placement each row's bottoms disagree; with it they agree exactly,
+        // and in neither case does the sheet's own height leak into the number.
+        let icons: Vec<IconInput> = (0..8)
+            .map(|i| {
+                if i % 2 == 0 {
+                    icon(i, 20.0, 8.0, 0.5)
+                } else {
+                    icon(i, 20.0, 14.0, 0.5)
+                }
+            })
+            .collect();
+        let two_columns = SheetSpec {
+            columns: 2,
+            ..spec()
+        };
+        let layout = GridLayout::solve(icons.len(), &two_columns);
+        let (_, centred) = place(&icons, &two_columns, &layout);
+        assert!(centred.baseline_spread > 0.0);
+        assert!(
+            centred.baseline_spread < layout.height as f32 / 2.0,
+            "the spread is a row's, not the sheet's: {}",
+            centred.baseline_spread
+        );
+        let baseline = SheetSpec {
+            placement: Placement::Baseline,
+            ..two_columns
+        };
+        let (_, aligned) = place(&icons, &baseline, &layout);
+        assert_eq!(aligned.baseline_spread, 0.0);
     }
 
     #[test]

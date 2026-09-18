@@ -19,6 +19,9 @@
 //! * [`sheet`] — §3.5 sheet generation: grid layout, auto-leveling, metadata
 //!   derivation and the SVG/PDF/PNG/CSV exporters (the arithmetic half is
 //!   dependency-free on purpose — see the module docs)
+//! * [`sheet_native`] — the raster half: the exported document rendered by
+//!   resvg/tiny-skia, and the usvg re-parse gate that stands in for
+//!   "opens cleanly in a browser"
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -31,6 +34,7 @@ pub mod pipeline;
 pub mod project;
 pub mod rss;
 pub mod sheet;
+pub mod sheet_native;
 
 pub use rss::{current_rss_bytes, RssWatcher};
 

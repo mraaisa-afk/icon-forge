@@ -13,21 +13,26 @@
 //! no longer parses is an error the caller can report per icon — never a
 //! silently missing cell.
 //!
-//! Writers are pure (`std` + `isg_core`): the raster exports (PNG) and the
-//! usvg re-parse gate live in `sheet_native`, next to the image crates, so the
-//! byte-level formats stay testable everywhere.
+//! Everything here is pure (`std` + `isg_core`), including the PNG writer: the
+//! `resvg` render that produces a PNG's pixels lives in `sheet_native`, but the
+//! bytes are this crate's own — see [`png`] for why, and for the reader that
+//! proves the round trip. The usvg re-parse gate lives there too.
 
 pub mod csv;
 pub mod pdf;
+pub mod png;
 pub mod svg;
 
 use isg_core::editor::svg as engine_svg;
 use isg_core::editor::{Affine, Point, Seg, Subpath};
 
 pub use csv::{
-    derive_row, write_csv, CsvError, IconMeta, SheetRow, CSV_COLUMNS, DEFAULT_DELIMITER,
+    artwork_file, check_artwork_covers, derive_row, derive_tags, expand_pattern, grid_position,
+    parse_csv, slugify, write_csv, Column, CsvError, CsvOptions, IconMeta, PatternValues, SheetRow,
+    CSV_COLUMNS, DEFAULT_DELIMITER,
 };
 pub use pdf::{validate_pdf, write_sheet_pdf, PdfOptions, PdfSummary};
+pub use png::{composite_over_rgb, parse_png, unpremultiply, write_rgba_png, PngError, PngInfo};
 pub use svg::{write_sheet_svg, SvgOptions};
 
 /// Fill used for an icon whose document gives it no colour.
