@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
 
 import { useEditor } from "../../state/editorStore";
-import { ALIGN_EDGES, type AlignEdge } from "../../wasm/abi";
+import { ALIGN_EDGES, BOOLEAN_OPS, type AlignEdge, type BooleanOp } from "../../wasm/abi";
+
+/** What each pathfinder operation does, for the button's tooltip. */
+const BOOLEAN_HINT: Record<BooleanOp, string> = {
+  union: "Merge the selection into one outline",
+  subtract: "Cut the upper shapes out of the bottom one",
+  intersect: "Keep only where the selection overlaps",
+  exclude: "Keep only the parts that do not overlap",
+};
 
 /** The glyphs the align buttons show, in the ABI's edge order. */
 const EDGE_LABEL: Record<AlignEdge, string> = {
@@ -66,7 +74,7 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
 }
 
 /**
- * Phase 4B panels: arrange, align, transform, groups and snapping.
+ * Phase 4B/4C panels: arrange, align, transform, groups, snapping, paths.
  *
  * Every control is one ABI command (or one setting the canvas reads) — none of
  * them computes geometry, which is the engine's job. The controls follow the
@@ -85,6 +93,8 @@ export function EditorPanels() {
   const resize = useEditor((s) => s.resize);
   const rotate = useEditor((s) => s.rotate);
   const setSnap = useEditor((s) => s.setSnap);
+  const booleanOp = useEditor((s) => s.booleanOp);
+  const importSvg = useEditor((s) => s.importSvg);
 
   const [frame, setFrame] = useState<"selection" | "canvas">("selection");
   const [size, setSize] = useState({ width: "", height: "" });
@@ -228,6 +238,42 @@ export function EditorPanels() {
             {groupCount} group{groupCount === 1 ? "" : "s"}
           </span>
         ) : null}
+      </Panel>
+
+      <Panel title="Path">
+        {BOOLEAN_OPS.map((op) => (
+          <PanelButton
+            key={op}
+            testId={`editor-boolean-${op}`}
+            label={op[0].toUpperCase() + op.slice(1)}
+            hint={BOOLEAN_HINT[op]}
+            // Two shapes minimum: a pathfinder needs something to combine with.
+            disabled={!ready || selection.length < 2}
+            onClick={() => booleanOp(op)}
+          />
+        ))}
+        <label
+          title="Import an SVG file into this document, as editable nodes"
+          className="flex cursor-pointer items-center gap-1 text-[11px] text-forge-text"
+        >
+          <input
+            type="file"
+            accept=".svg,image/svg+xml"
+            data-testid="editor-import-svg"
+            disabled={!ready}
+            className="w-32 text-[10px] file:mr-1 file:rounded file:border file:border-forge-edge file:bg-forge-panel file:px-1 file:text-forge-text"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (!file) return;
+              void file.text().then((text) => {
+                importSvg(text);
+                // Let the same file be picked again after a mistake.
+                event.target.value = "";
+              });
+            }}
+          />
+          Import SVG
+        </label>
       </Panel>
 
       <Panel title="Snap">

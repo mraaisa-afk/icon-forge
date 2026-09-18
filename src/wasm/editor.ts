@@ -23,12 +23,14 @@
 
 import {
   ABI_VERSION,
+  decodeNodeRecords,
   decodePath,
   decodeSnapResult,
   decodeText,
   encodeCommand,
   encodeDoc,
   encodeSnapRequest,
+  encodeSvgSpec,
   ERR,
   ERR_TEXT,
   FEATURE,
@@ -46,6 +48,7 @@ import {
   type Box,
   type EditorCommand,
   type NodeSpec,
+  type Rgba,
   type Segment,
   type SnapResult,
   type Subpath,
@@ -464,6 +467,48 @@ export class EditorSession {
     if (words === 0) return null;
     const { mem, outBase } = this.#view();
     return decodePath(mem, outBase).path;
+  }
+
+  /**
+   * Parses SVG text into node specs, without needing a document (4C).
+   *
+   * The module owns the parser: there is no TypeScript one (see
+   * `ARCHITECTURE.md` §3.9 — 4A's deviation is retired here), so an icon's
+   * geometry is read by exactly the code that draws it. `firstId` numbers the
+   * nodes from there, `placement` is folded into each shape's own transform
+   * chain, and `fill` is used for shapes the file gives no colour.
+   */
+  svgNodes(
+    text: string,
+    firstId: number,
+    placement: readonly number[],
+    fill: Rgba,
+  ): EditorResult<NodeSpec[]> {
+    this.#put(encodeSvgSpec(text, firstId, placement, fill));
+    const count = this.call(FEATURE.SVG_NODES);
+    if (count === 0 && this.#error !== ERR.NONE) return this.#fail();
+    return { ok: true, value: this.#records(count) };
+  }
+
+  /**
+   * Imports SVG text into the open document, one node per `<path>` (4C).
+   *
+   * One history step, and the imported nodes become the selection — an import
+   * that left nothing selected would look like it failed. The engine refuses a
+   * file it cannot read (`ERR.MALFORMED_SVG`) and one that draws nothing.
+   */
+  importSvg(text: string, placement: readonly number[], fill: Rgba): EditorResult<number> {
+    this.#put(encodeSvgSpec(text, 0, placement, fill));
+    const added = this.call(FEATURE.IMPORT_SVG);
+    this.#previewed = null;
+    if (added === 0) return this.#fail();
+    return { ok: true, value: added };
+  }
+
+  /** Decodes `count` node records straight out of the output region. */
+  #records(count: number): NodeSpec[] {
+    const { mem, outBase } = this.#view();
+    return decodeNodeRecords(mem, outBase, count);
   }
 
   /** The bounding box of one node, in document space. */

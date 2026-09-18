@@ -9,10 +9,16 @@
 
 import {
   GUIDE_KIND,
+  KIND,
   SNAP,
   type Box,
   type EditorCommand,
+  type HandleAddress,
+  type NodeSpec,
   type Point,
+  type SegmentAddress,
+  type Subpath,
+  type VertexAddress,
 } from "../../wasm/abi";
 
 /** Where the document sits inside the canvas, and how big one unit is. */
@@ -335,6 +341,257 @@ export function applyAffine(m: Affine, point: Point): Point {
 }
 
 /** The box a command moves `box` to (used to keep the handles under the drag). */
+// ---------------------------------------------------------------------------
+// 4C: node editing
+// ---------------------------------------------------------------------------
+
+/** How finely a cubic is sampled when hit-testing it. */
+export const CURVE_SAMPLES = 32;
+
+/** How close to a point a click has to be, in *document* units. */
+export const POINT_GRAB = 6;
+
+/** One point of a node the direct-selection tool can grab, in document space. */
+export interface NodePoint {
+  /** The node it belongs to. */
+  node: number;
+  /** What it is, for the command that moves it. */
+  at: VertexAddress | HandleAddress;
+  /** Where it is now, in document space. */
+  to: Point;
+  /** For a handle: the vertex it turns about (the lever's other end). */
+  from: Point | null;
+}
+
+/** The local-space point an address refers to, or `null` when it does not exist. */
+export function localPoint(node: NodeSpec, at: VertexAddress | HandleAddress): Point | null {
+  const sub = node.path[at.subpath];
+  if (!sub) return null;
+  if (at.of === "vertex") {
+    if (at.vertex === 0) return sub.start;
+    const seg = sub.segs[at.vertex - 1];
+    return seg ? seg.to : null;
+  }
+  const seg = sub.segs[at.segment];
+  if (!seg || seg.kind !== KIND.CUBIC) return null;
+  return at.handle === "c1" ? seg.c1 : seg.c2;
+}
+
+/**
+ * Every vertex of a node, plus the control handles of its cubic segments.
+ *
+ * Vertices come first so that a click near both a vertex and a handle grabs the
+ * vertex — the same priority the engine's own point hit-test uses.
+ */
+export function nodePoints(node: NodeSpec): NodePoint[] {
+  const vertices: NodePoint[] = [];
+  const handles: NodePoint[] = [];
+  const m = node.m as Affine;
+  node.path.forEach((sub, subpath) => {
+    vertices.push({
+      node: node.id,
+      at: { of: "vertex", subpath, vertex: 0 },
+      to: applyAffine(m, sub.start),
+      from: null,
+    });
+    sub.segs.forEach((seg, index) => {
+      vertices.push({
+        node: node.id,
+        at: { of: "vertex", subpath, vertex: index + 1 },
+        to: applyAffine(m, seg.to),
+        from: null,
+      });
+      if (seg.kind !== KIND.CUBIC) return;
+      handles.push(
+        {
+          node: node.id,
+          at: { of: "handle", subpath, segment: index, handle: "c1" },
+          to: applyAffine(m, seg.c1),
+          from: applyAffine(m, sub.start),
+        },
+        {
+          node: node.id,
+          at: { of: "handle", subpath, segment: index, handle: "c2" },
+          to: applyAffine(m, seg.c2),
+          from: applyAffine(m, seg.to),
+        },
+      );
+    });
+  });
+  return [...vertices, ...handles];
+}
+
+/** The nearest point within `grab` document units, vertices first. */
+export function hitPoint(
+  points: readonly NodePoint[],
+  at: Point,
+  grab = POINT_GRAB,
+): NodePoint | null {
+  let best: NodePoint | null = null;
+  let bestDistance = grab;
+  for (const point of points) {
+    const distance = Math.hypot(point.to.x - at.x, point.to.y - at.y);
+    if (distance <= bestDistance) {
+      best = point;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * The place on a node's outline nearest to `at`, or `null`.
+ *
+ * Cubics are sampled rather than solved: the answer is a parameter for
+ * `insertPoint`, and landing within a sample of where the user clicked is what
+ * the gesture means. The sample index is divided by [`CURVE_SAMPLES`], so the
+ * inserted vertex stays strictly inside the segment.
+ */
+export function hitSegment(
+  node: NodeSpec,
+  at: Point,
+  grab = POINT_GRAB,
+): SegmentAddress | null {
+  const m = node.m as Affine;
+  let best: SegmentAddress | null = null;
+  let bestDistance = grab;
+  // A straight segment is measured exactly (a projection needs no samples); a
+  // cubic is walked in steps, which is also how the engine flattens one.
+  const consider = (subpath: number, segment: number, t: number, at0: Point): void => {
+    const point = applyAffine(m, at0);
+    const distance = Math.hypot(point.x - at.x, point.y - at.y);
+    if (distance > bestDistance) return;
+    // The parameter stays strictly inside the segment: `insertPoint` refuses
+    // `t = 0` and `t = 1`, which are the segment's own ends.
+    best = { of: "segment", subpath, segment, t: Math.min(0.95, Math.max(0.05, t)) };
+    bestDistance = distance;
+  };
+  node.path.forEach((sub, subpath) => {
+    let start = sub.start;
+    sub.segs.forEach((seg, segment) => {
+      if (seg.kind === KIND.LINE) {
+        const dx = seg.to.x - start.x;
+        const dy = seg.to.y - start.y;
+        const length2 = dx * dx + dy * dy;
+        // The projection has to happen in the path's own space, so the pointer
+        // is pulled back through the node's transform first.
+        const local = invertAffine(m, at) ?? at;
+        const t =
+          length2 > 0
+            ? Math.min(1, Math.max(0, ((local.x - start.x) * dx + (local.y - start.y) * dy) / length2))
+            : 0;
+        consider(subpath, segment, t, {
+          x: start.x + dx * t,
+          y: start.y + dy * t,
+        });
+      } else {
+        const c1 = seg.c1;
+        const c2 = seg.c2;
+        for (let i = 0; i <= CURVE_SAMPLES; i++) {
+          const t = i / CURVE_SAMPLES;
+          consider(subpath, segment, t, cubicAt(start, c1, c2, seg.to, t));
+        }
+      }
+      start = seg.to;
+    });
+  });
+  return best;
+}
+
+/** A cubic Bézier evaluated at `t`, in the path's own space. */
+export function cubicAt(start: Point, c1: Point, c2: Point, to: Point, t: number): Point {
+  const u = 1 - t;
+  const a = u * u * u;
+  const b = 3 * u * u * t;
+  const c = 3 * u * t * t;
+  const d = t * t * t;
+  return {
+    x: a * start.x + b * c1.x + c * c2.x + d * to.x,
+    y: a * start.y + b * c1.y + c * c2.y + d * to.y,
+  };
+}
+
+/**
+ * A local subpath with one point moved — the live outline a drag draws.
+ *
+ * The engine is not asked until the gesture ends (one gesture, one command, one
+ * undo step), so the drag has to paint its own geometry. Moving a vertex drags
+ * its attached handles with it, exactly as the engine's own `move_vertex` does.
+ */
+export function subpathWithPointMoved(
+  sub: Subpath,
+  at: VertexAddress | HandleAddress,
+  to: Point,
+): Subpath {
+  if (at.of === "handle") {
+    const segs = sub.segs.map((seg, index) => {
+      if (index !== at.segment || seg.kind !== KIND.CUBIC) return seg;
+      return at.handle === "c1" ? { ...seg, c1: to } : { ...seg, c2: to };
+    });
+    return { ...sub, segs };
+  }
+  // Exactly what the engine's `move_vertex` does: the anchor moves, then its
+  // two handles follow by the same delta — the incoming one belongs to the
+  // segment that *ends* here, the outgoing one to the segment that starts here.
+  // At vertex 0 the incoming edge is the implicit straight close, so there is
+  // no handle to drag, and the last vertex's outgoing edge is that same close.
+  if (at.vertex === 0) {
+    const delta = { x: to.x - sub.start.x, y: to.y - sub.start.y };
+    const first = sub.segs[0];
+    const segs =
+      first && first.kind === KIND.CUBIC
+        ? [{ ...first, c1: { x: first.c1.x + delta.x, y: first.c1.y + delta.y } }, ...sub.segs.slice(1)]
+        : sub.segs;
+    return { ...sub, start: to, segs };
+  }
+  const index = at.vertex - 1;
+  const anchor = sub.segs[index]?.to;
+  if (!anchor) return sub; // no such vertex: nothing to move
+  const delta = { x: to.x - anchor.x, y: to.y - anchor.y };
+  const segs = sub.segs.map((seg, i) => {
+    if (i === index) {
+      // The segment that ends at the moved vertex: its end moves and so does
+      // the handle that hangs off that end.
+      return seg.kind === KIND.CUBIC
+        ? { ...seg, c2: { x: seg.c2.x + delta.x, y: seg.c2.y + delta.y }, to }
+        : { ...seg, to };
+    }
+    if (i === index + 1 && seg.kind === KIND.CUBIC) {
+      // The segment that leaves the moved vertex: its handle follows too.
+      return { ...seg, c1: { x: seg.c1.x + delta.x, y: seg.c1.y + delta.y } };
+    }
+    return seg;
+  });
+  return { ...sub, segs };
+}
+
+/** The whole node with one point moved (the outline a point drag paints). */
+export function nodeWithPointMoved(
+  node: NodeSpec,
+  at: VertexAddress | HandleAddress,
+  to: Point,
+): NodeSpec {
+  // `to` arrives in document space; the path is local, so the point is inverted
+  // through the node's own transform before it is written into the geometry.
+  const local = invertAffine(node.m as Affine, to) ?? to;
+  return {
+    ...node,
+    path: node.path.map((sub, index) =>
+      index === at.subpath ? subpathWithPointMoved(sub, at, local) : sub,
+    ),
+  };
+}
+
+/** The inverse of an affine, or `null` when it is singular. */
+export function invertAffine(m: Affine, point: Point): Point | null {
+  const [a, b, c, d, e, f] = m;
+  const det = a * d - b * c;
+  if (Math.abs(det) < 1e-9) return null;
+  const x = point.x - e;
+  const y = point.y - f;
+  return { x: (d * x - c * y) / det, y: (a * y - b * x) / det };
+}
+
 export function boxAfterCommand(box: Box, command: EditorCommand): Box {
   const m = commandAffine(command);
   if (!m) return box;

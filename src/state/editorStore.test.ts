@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EditorSession } from "../wasm/editor";
 import { KIND, SNAP, type NodeSpec, type Subpath } from "../wasm/abi";
 import { artifactAvailable as available, loadArtifact } from "../wasm/artifact";
-import { editorSession, useEditor, nodeFromSvg, EDITOR_ICON_LIMIT } from "./editorStore";
+import { editorSession, useEditor, nodesFromSvg, EDITOR_ICON_LIMIT } from "./editorStore";
 import { SNAP_DEFAULTS } from "../components/editor/canvasModel";
 
 function square(x: number, y: number, size: number): Subpath {
@@ -42,25 +42,6 @@ async function adoptFixture(): Promise<void> {
 
 afterEach(() => {
   useEditor.getState().close();
-});
-
-describe("nodeFromSvg", () => {
-  const SVG = `<svg><path d="M0 0 L10 0 L10 10 Z" fill="#3366ff"/><path d="M20 20 L30 20 L30 30 Z" fill="#ff0000"/></svg>`;
-
-  it("turns a traced icon into one node carrying every subpath", () => {
-    const node = nodeFromSvg(7, SVG);
-    expect(node?.id).toBe(7);
-    expect(node?.fill).toEqual([0x33, 0x66, 0xff, 255]);
-    expect(node?.visible).toBe(true);
-    expect(node?.path).toHaveLength(2);
-    expect(node?.m).toEqual([1, 0, 0, 1, 0, 0]);
-  });
-
-  it("falls back to a readable fill and to null for an empty trace", () => {
-    const noFill = nodeFromSvg(1, `<svg><path d="M0 0 L1 1"/></svg>`);
-    expect(noFill?.fill).toEqual([214, 219, 227, 255]);
-    expect(nodeFromSvg(1, `<svg><rect width="1" height="1"/></svg>`)).toBeNull();
-  });
 });
 
 describe("editor store without a session", () => {
@@ -99,6 +80,55 @@ describe("editor store without a session", () => {
 
   it("says how many icons 4A will load", () => {
     expect(EDITOR_ICON_LIMIT).toBeGreaterThan(0);
+  });
+});
+
+describe.skipIf(!available)("nodesFromSvg through the engine", () => {
+  const TWO = `<svg><path d="M0 0 L10 0 L10 10 Z" fill="#3366ff"/><path d="M20 20 L30 20 L30 30 Z" fill="#ff0000"/></svg>`;
+
+  /** A session with no document: parsing is not an edit, so none is needed. */
+  async function engine(): Promise<EditorSession> {
+    const bytes = loadArtifact();
+    if (!bytes) throw new Error("the editor artifact is missing");
+    return EditorSession.fromBytes(bytes);
+  }
+
+  it("reads one node per path, numbered from the id it is given", async () => {
+    const session = await engine();
+    const nodes = nodesFromSvg(session, 7, TWO);
+    expect(nodes.map((node) => node.id)).toEqual([7, 8]);
+    // Each layer keeps its own colour, and its geometry is what the file wrote.
+    expect(nodes[0].fill).toEqual([0x33, 0x66, 0xff, 255]);
+    expect(nodes[1].fill).toEqual([0xff, 0x00, 0x00, 255]);
+    expect(nodes[0].visible).toBe(true);
+    expect(nodes[0].path).toHaveLength(1);
+    expect(nodes[0].path[0].segs).toHaveLength(2); // M…Z closes implicitly
+    expect(nodes[1].path[0].start).toEqual({ x: 20, y: 20 });
+    expect(session.nodeCount()).toBe(0);
+    expect(session.history().canUndo).toBe(false);
+  });
+
+  it("keeps a shape's own transform on its node", async () => {
+    const session = await engine();
+    const nodes = nodesFromSvg(
+      session,
+      1,
+      `<svg><g transform="translate(10,20)"><path d="M0 0 L4 0 L4 4 Z"/></g></svg>`,
+    );
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].m).toEqual([1, 0, 0, 1, 10, 20]);
+    expect(nodes[0].path[0].start).toEqual({ x: 0, y: 0 });
+  });
+
+  it("falls back to a readable fill, and reports nothing for an empty trace", async () => {
+    const session = await engine();
+    const noFill = nodesFromSvg(session, 1, `<svg><path d="M0 0 L1 1"/></svg>`);
+    expect(noFill[0].fill).toEqual([214, 219, 227, 255]);
+    // No `<path>` at all, and a path that draws nothing: nothing to load.
+    expect(nodesFromSvg(session, 1, `<svg><rect width="1" height="1"/></svg>`)).toEqual([]);
+    expect(nodesFromSvg(session, 1, `<svg><path d="M5 5"/></svg>`)).toEqual([]);
+    // A file the parser refuses is a refusal, not an empty icon.
+    expect(nodesFromSvg(session, 1, `<svg><path d="M0 0 B1 1"/></svg>`)).toEqual([]);
   });
 });
 
@@ -301,6 +331,72 @@ describe.skipIf(!available)("editor store 4B surface", () => {
     console.log(
       "evidence: editor panels — align, arrange, resize and rotate driven through the store: every " +
         "command is one history step, and a refusal is reported instead of thrown",
+    );
+  });
+
+  it("drives booleans, point edits and SVG import through the store", async () => {
+    await adoptFixture();
+    const store = () => useEditor.getState();
+
+    // One shape needs a document but not a second shape: a pathfinder with one
+    // operand is refused with a note rather than a crash.
+    store().click(15, 15, false);
+    store().booleanOp("union");
+    expect(store().note).toMatch(/needs two or more shapes/);
+    expect(store().nodes).toHaveLength(2);
+
+    // Two shapes, one outline. The two squares touch, so their union is the box
+    // that contains both and the pair becomes a single node.
+    store().selectAll();
+    store().booleanOp("union");
+    expect(store().nodes).toHaveLength(1);
+    expect(store().history.undoLabel).toBe("boolean");
+    expect(store().note).toMatch(/^union · /);
+    store().undo();
+    expect(store().nodes).toHaveLength(2);
+    store().redo();
+    expect(store().nodes).toHaveLength(1);
+    store().undo();
+
+    // A vertex drag is one command, one history step, and it moves the node's
+    // box with it (the outline, not just a dot, is what changed).
+    const before = store().nodes[0].m.slice();
+    store().editPoint(1, { of: "vertex", subpath: 0, vertex: 1 }, { x: 40, y: 10 });
+    expect(store().history.undoLabel).toBe("point");
+    expect(store().nodes[0].path[0].segs[0].to).toEqual({ x: 40, y: 10 });
+    expect(store().nodes[0].m).toEqual(before);
+    store().undo();
+    expect(store().nodes[0].path[0].segs[0].to).toEqual({ x: 30, y: 10 });
+
+    // Deleting a vertex of a closed square leaves a triangle; inserting one on
+    // a segment puts it back.
+    store().deletePoint(1, { of: "vertex", subpath: 0, vertex: 1 });
+    expect(store().nodes[0].path[0].segs).toHaveLength(2);
+    store().undo();
+    store().editPoint(1, { of: "segment", subpath: 0, segment: 1, t: 0.5 }, null);
+    expect(store().nodes[0].path[0].segs).toHaveLength(4);
+    store().undo();
+
+    // Importing is one step, selects what it brought in, and reports it.
+    store().importSvg(
+      `<svg><path d="M4 4 L28 4 L28 28 L4 28 Z" fill="#123456"/></svg>`,
+    );
+    expect(store().nodes).toHaveLength(3);
+    expect(store().history.undoLabel).toBe("import svg");
+    expect(store().note).toMatch(/imported 1 shape$/);
+    expect(store().selection).toEqual([store().nodes[store().nodes.length - 1].id]);
+    store().undo();
+    expect(store().nodes).toHaveLength(2);
+
+    // A file that is not readable SVG says so instead of importing nothing.
+    store().importSvg(`<svg><path d="M0 0 B1 1"/></svg>`);
+    expect(store().note).toMatch(/svg/i);
+    expect(store().nodes).toHaveLength(2);
+
+    console.log(
+      "evidence: editor panels — booleans, point edits and SVG import driven through the store: " +
+        "each edit is one history step, each refusal lands in the status line, and a point drag " +
+        "moves the outline rather than the node's transform",
     );
   });
 

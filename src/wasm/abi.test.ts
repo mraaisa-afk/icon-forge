@@ -9,6 +9,7 @@ import {
   encodeDoc,
   encodePath,
   encodeSnapRequest,
+  encodeSvgSpec,
   ERR,
   FEATURE,
   f2w,
@@ -254,6 +255,80 @@ describe("command specs", () => {
     });
     expect(Array.from(encodeCommand({ kind: "group" }))).toEqual([OP.GROUP]);
     expect(Array.from(encodeCommand({ kind: "ungroup" }))).toEqual([OP.UNGROUP]);
+  });
+
+  it("lays out the 4C commands too", () => {
+    // Point edits carry the address as words, then the target as f32 bits.
+    expect(
+      Array.from(
+        encodeCommand({
+          kind: "movePoint",
+          node: 4,
+          at: { of: "vertex", subpath: 1, vertex: 2 },
+          to: { x: 7, y: -8 },
+        }),
+      ),
+    ).toEqual([OP.MOVE_POINT, 4, 1, 2, f2w(7), f2w(-8)]);
+    expect(
+      Array.from(
+        encodeCommand({
+          kind: "moveHandle",
+          node: 4,
+          at: { of: "handle", subpath: 0, segment: 3, handle: "c2" },
+          to: { x: 1, y: 2 },
+        }),
+      ),
+    ).toEqual([OP.MOVE_HANDLE, 4, 0, 3, 1, f2w(1), f2w(2)]);
+    expect(
+      Array.from(
+        encodeCommand({
+          kind: "insertPoint",
+          node: 9,
+          at: { of: "segment", subpath: 0, segment: 1, t: 0.25 },
+        }),
+      ),
+    ).toEqual([OP.INSERT_POINT, 9, 0, 1, f2w(0.25)]);
+    expect(
+      Array.from(
+        encodeCommand({ kind: "deletePoint", node: 9, at: { of: "vertex", subpath: 2, vertex: 0 } }),
+      ),
+    ).toEqual([OP.DELETE_POINT, 9, 2, 0]);
+    // Segment kinds and boolean ops are the raw numbers the Rust enums define.
+    expect(
+      Array.from(
+        encodeCommand({
+          kind: "setSegment",
+          node: 9,
+          at: { of: "segment", subpath: 0, segment: 1, t: 0.5 },
+          to: "cubic",
+        }),
+      ),
+    ).toEqual([OP.SET_SEGMENT, 9, 0, 1, 1]);
+    const ops = ["union", "subtract", "intersect", "exclude"] as const;
+    ops.forEach((op, raw) => {
+      expect(Array.from(encodeCommand({ kind: "boolean", op }))).toEqual([OP.BOOLEAN, raw]);
+    });
+  });
+});
+
+describe("svg spec", () => {
+  it("packs the header the module reads, and the text four bytes to a word", () => {
+    const words = encodeSvgSpec("<svg/>", 7, [1, 0, 0, 1, 5, 6], [1, 2, 3, 255]);
+    // id, placement (f32 bits), fill, byte length, then the packed text.
+    expect(words.slice(0, 8)).toEqual([7, f2w(1), f2w(0), f2w(0), f2w(1), f2w(5), f2w(6), 0x010203ff]);
+    expect(words[8]).toBe(6);
+    expect(words).toHaveLength(9 + 2);
+    // The module reads text back with the same little-endian packing.
+    expect(decodeText(Uint32Array.from(words.slice(9)), 6)).toBe("<svg/>");
+  });
+
+  it("packs multi-byte characters and pads the last word", () => {
+    const text = "<svg>…</svg>";
+    const words = encodeSvgSpec(text, 0, [1, 0, 0, 1, 0, 0], [0, 0, 0, 0]);
+    const length = new TextEncoder().encode(text).length;
+    expect(words[8]).toBe(length);
+    expect(words.length).toBe(9 + Math.ceil(length / 4));
+    expect(decodeText(Uint32Array.from(words.slice(9)), length)).toBe(text);
   });
 });
 

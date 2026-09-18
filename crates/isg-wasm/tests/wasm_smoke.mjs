@@ -39,6 +39,8 @@ const F = {
   CLOSE: 36,
   SNAP: 37,
   PREVIEW: 38,
+  SVG_NODES: 39,
+  IMPORT_SVG: 40,
 };
 
 const OP = {
@@ -52,6 +54,12 @@ const OP = {
   ARRANGE: 12,
   ALIGN: 13,
   SCALE_XY: 14,
+  MOVE_POINT: 15,
+  MOVE_HANDLE: 16,
+  INSERT_POINT: 17,
+  DELETE_POINT: 18,
+  SET_SEGMENT: 19,
+  BOOLEAN: 20,
 };
 
 // SNAP flags / PREVIEW arguments.
@@ -357,6 +365,161 @@ call(F.UNDO);
 while (call(F.CAN_UNDO)) call(F.UNDO);
 check("back to a clean history", call(F.HISTORY_LEN) === 0);
 
+// --- 4C: point editing, booleans and SVG import ------------------------------
+// Node 1 is the 10..30 square. Its first vertex is the only one that is not on
+// the origin corner, so moving it is visible in the record.
+call(F.SELECT_ONLY, 1);
+put([OP.MOVE_POINT, 1, 0, 1, f2w(35), f2w(12)]);
+check("move_point", call(F.APPLY_SPEC) === 1, `error=${error()}`);
+// The flush carries the placed path: subpath count, then start x/y, closed,
+// segment count, then 7 words per segment (kind, c1, c2, to). Vertex 1 is the
+// end point of segment 0, i.e. words 10 and 11.
+const segmentEnd = (id) => {
+  call(F.PATH_FLUSH, id);
+  const w = out(12).map(w2f);
+  return [w[10], w[11]];
+};
+check(
+  "the moved vertex is in the flushed path",
+  segmentEnd(1).every((v, i) => Math.abs(v - [35, 12][i]) < 1e-3),
+  segmentEnd(1).join(","),
+);
+check("undo the point edit", call(F.UNDO) === 5, "label bytes for 'point'");
+check(
+  "undo restored the vertex",
+  segmentEnd(1).every((v, i) => Math.abs(v - [30, 10][i]) < 1e-3),
+  segmentEnd(1).join(","),
+);
+
+// Insert a vertex on the first segment, convert it to a cubic, drag one of its
+// handles, then delete the inserted vertex again — five edits, five steps.
+put([OP.INSERT_POINT, 1, 0, 0, f2w(0.5)]);
+check("insert_point", call(F.APPLY_SPEC) === 1);
+check("segment count grew", call(F.SEGMENT_COUNT) === 7);
+put([OP.SET_SEGMENT, 1, 0, 0, 1]);
+check("set_segment to cubic", call(F.APPLY_SPEC) === 1);
+put([OP.MOVE_HANDLE, 1, 0, 0, 0, f2w(22), f2w(-6)]);
+check("move_handle", call(F.APPLY_SPEC) === 1);
+put([OP.DELETE_POINT, 1, 0, 1]);
+check("delete_point", call(F.APPLY_SPEC) === 1);
+check("segment count is back", call(F.SEGMENT_COUNT) === 6);
+// The undone move was dropped when the next edit pushed its own step, so the
+// cursor sits at the four edits that followed it.
+check("four more history steps", call(F.HISTORY_LEN) === 4);
+while (call(F.CAN_UNDO)) call(F.UNDO);
+check("the point edits undo back to a clean history", call(F.HISTORY_LEN) === 0);
+check(
+  "and back to the original square",
+  segmentEnd(1).every((v, i) => Math.abs(v - [30, 10][i]) < 1e-3),
+  segmentEnd(1).join(","),
+);
+
+// A boolean over the wire: the two squares overlap by 20 in each axis, so the
+// union is one 60x60 node and the undo brings both back.
+call(F.SELECT_ALL);
+put([OP.BOOLEAN, 0]);
+// Two ops: the path edit and the removal of the second node. Neither node
+// carries a placement, so the result needs no transform op.
+check("boolean union", call(F.APPLY_SPEC) === 2, `error=${error()}`);
+check("one node left", call(F.NODE_COUNT) === 1);
+call(F.NODE_BOUNDS, 1);
+check(
+  "the union spans both squares",
+  out(4)
+    .map(w2f)
+    .every((v, i) => Math.abs(v - [10, 10, 80, 50][i]) < 1e-3),
+  out(4).map(w2f).join(","),
+);
+check("undo the boolean", call(F.UNDO) === 7);
+check("both nodes are back", call(F.NODE_COUNT) === 2);
+
+// SVG text, both ways: parsed with no document at all, then imported into one.
+const svgText =
+  '<svg viewBox="0 0 32 32">' +
+  '<path d="M4,4 L28,4 L28,28 L4,28 Z" fill="#123456"/>' +
+  '<g transform="translate(2,2)"><path d="M8,8 C12,4 20,4 24,8"/></g>' +
+  "</svg>";
+const putSvg = (firstId, m, fill) => {
+  const bytes =
+    typeof TextEncoder === "undefined"
+      ? Uint8Array.from(svgText, (c) => c.charCodeAt(0))
+      : new TextEncoder().encode(svgText);
+  const w = [firstId, ...m.map(f2w), fill >>> 0, bytes.length];
+  for (let i = 0; i < bytes.length; i += 4) {
+    let word = 0;
+    for (let j = 0; j < 4 && i + j < bytes.length; j++) word |= bytes[i + j] << (8 * j);
+    w.push(word >>> 0);
+  }
+  put(w);
+};
+check(
+  "close before the import test",
+  call(F.CLOSE) === 0 && call(F.NODE_COUNT) === 0 && error() === 2,
+);
+putSvg(7, [1, 0, 0, 1, 0, 0], 0x000000ff);
+const parsedRecords = call(F.SVG_NODES);
+check(
+  "svg_nodes needs no document",
+  parsedRecords === 2 && error() === 0,
+  `records=${parsedRecords} error=${error()}`,
+);
+{
+  const { mem, outBase } = views();
+  const ids = [mem[outBase], mem[outBase + 11 + mem[outBase + 10]]];
+  const fill = mem[outBase + 7];
+  check(
+    "svg_nodes reports the file's geometry and fills",
+    ids.join(",") === "7,8" && fill === 0x123456ff,
+    `ids=${ids.join(",")} fill=${fill.toString(16)}`,
+  );
+}
+put(
+  encDoc(100, 100, [
+    { id: 1, m: [1, 0, 0, 1, 0, 0], fill: [9, 9, 9, 255], visible: true, path: [square(0, 0, 5)] },
+  ]),
+);
+check("load a document to import into", call(F.DOC_LOAD) === 1);
+putSvg(1, [1, 0, 0, 1, 10, 20], 0x090909ff);
+check(
+  "import_svg adds one node per path",
+  call(F.IMPORT_SVG) === 2 && call(F.NODE_COUNT) === 3,
+  `error=${error()}`,
+);
+check("the import is one history step", call(F.HISTORY_LEN) === 1);
+check("undo the import", call(F.UNDO) === 10);
+check("nothing of it is left", call(F.NODE_COUNT) === 1);
+putSvg(1, [1, 0, 0, 1, 0, 0], 0x090909ff);
+// REDO answers with the byte length of the label it replayed, like UNDO.
+check("import it again", call(F.REDO) === 10 && call(F.NODE_COUNT) === 3);
+// Malformed text is refused with its own code, not silently skipped.
+{
+  const bad = '<svg><path d="M0,0 B1,1"/></svg>';
+  const bytes = Uint8Array.from(bad, (c) => c.charCodeAt(0));
+  const w = [1, f2w(1), f2w(0), f2w(0), f2w(1), f2w(0), f2w(0), 0x090909ff, bytes.length];
+  for (let i = 0; i < bytes.length; i += 4) {
+    let word = 0;
+    for (let j = 0; j < 4 && i + j < bytes.length; j++) word |= bytes[i + j] << (8 * j);
+    w.push(word >>> 0);
+  }
+  put(w);
+  check(
+    "malformed svg text is refused",
+    call(F.SVG_NODES) === 0 && error() === 11,
+    `error=${error()}`,
+  );
+}
+while (call(F.CAN_UNDO)) call(F.UNDO);
+call(F.CLOSE);
+
+// Reload the fixture the walk expects, now that the import section closed it.
+put(
+  encDoc(200, 120, [
+    { id: 1, m: [1, 0, 0, 1, 0, 0], fill: [255, 0, 0, 255], visible: true, path: [square(10, 10, 20)] },
+    { id: 2, m: [1, 0, 0, 1, 50, 20], fill: [0, 255, 0, 255], visible: true, path: [square(0, 0, 30)] },
+  ]),
+);
+check("reload the walk fixture", call(F.DOC_LOAD) === 2);
+
 // A longer randomised walk: undo and redo must be exact every single time.
 let seed = 0x12345678;
 const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
@@ -378,6 +541,7 @@ let walk = 0;
 let exact = true;
 for (let i = 0; i < 400 && exact; i++) {
   call(F.SELECT_ALL);
+  const top = call(F.NODE_AT, 0);
   const spec = [
     [OP.TRANSLATE, f2w(rnd() * 8 - 4), f2w(rnd() * 8 - 4)],
     [OP.SCALE, f2w(0.5 + rnd()), f2w(50), f2w(50)],
@@ -388,7 +552,16 @@ for (let i = 0; i < 400 && exact; i++) {
     [OP.ALIGN, 0, Math.floor(rnd() * 6)],
     [OP.GROUP],
     [OP.UNGROUP],
-  ][Math.floor(rnd() * 9)];
+    // 4C: the newest geometry joins the walk, addressed at the top node's first
+    // subpath. A spec that no longer fits the geometry is refused and skipped —
+    // that is the same contract the adapter relies on.
+    [OP.MOVE_POINT, top, 0, 1, f2w(rnd() * 40), f2w(rnd() * 40)],
+    [OP.INSERT_POINT, top, 0, 0, f2w(0.1 + rnd() * 0.8)],
+    [OP.SET_SEGMENT, top, 0, 0, rnd() < 0.5 ? 0 : 1],
+    [OP.MOVE_HANDLE, top, 0, 0, rnd() < 0.5 ? 0 : 1, f2w(rnd() * 40), f2w(rnd() * 40)],
+    [OP.DELETE_POINT, top, 0, 1],
+    [OP.BOOLEAN, Math.floor(rnd() * 4)],
+  ][Math.floor(rnd() * 15)];
   const before = snapshot();
   put(spec);
   if (call(F.APPLY_SPEC) === 0) continue;
@@ -419,7 +592,8 @@ if (!failures.length) {
     `evidence: wasm artifact — ${bytes.length} bytes, ABI v${e.editor_abi_version()}, ` +
       `${instance.exports.memory.buffer.byteLength >>> 20} MiB memory after the tables allocate, ` +
       `${walk} edits walked with exact undo and redo (including groups, ` +
-      `align and non-uniform scale)`,
+      `align, non-uniform scale, point editing, booleans and SVG import ` +
+      `in both directions)`,
   );
 }
 // `process.exit()` would drop buffered writes when stdout is a pipe (it is, in

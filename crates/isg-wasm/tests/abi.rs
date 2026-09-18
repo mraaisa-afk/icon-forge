@@ -8,14 +8,15 @@
 //! the exported `editor_call` uses).
 
 use isg_wasm::abi::{
-    self, feature, Abi, ABI_VERSION, DOC_HEADER, ERR_BAD_ARGUMENT, ERR_BAD_FEATURE, ERR_DEGENERATE,
-    ERR_MISSING_NODE, ERR_NONE, ERR_NO_DOCUMENT, ERR_NO_HISTORY, ERR_NO_OP, ERR_NO_SELECTION,
-    ERR_TRANSPARENT, IN_WORDS, MAX_FEATURE, MAX_NODES, NODE_RECORD_HEADER, OUT_WORDS,
+    self, feature, Abi, ABI_VERSION, DOC_HEADER, ERR_BAD_ARGUMENT, ERR_BAD_FEATURE, ERR_CAPACITY,
+    ERR_DEGENERATE, ERR_MISSING_NODE, ERR_NONE, ERR_NO_DOCUMENT, ERR_NO_HISTORY, ERR_NO_OP,
+    ERR_NO_SELECTION, ERR_TRANSPARENT, IN_WORDS, MAX_FEATURE, MAX_NODES, NODE_RECORD_HEADER,
+    OUT_WORDS,
 };
 use isg_wasm::doc_blob::{decode_doc, decode_path, encode_doc, encode_path};
 use isg_wasm::editor::{
-    Affine, AlignEdge, AlignFrame, ArrangeTo, Command, Doc, GroupId, Node, NodeId, Point, Seg,
-    Subpath,
+    Affine, AlignEdge, AlignFrame, ArrangeTo, BooleanOp, Command, Doc, GroupId, Handle, HandleRef,
+    Node, NodeId, Point, Seg, SegKind, SegmentRef, Subpath, VertexRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -139,39 +140,47 @@ impl Harness {
     /// Reads the node records the last `NODE_SYNC` wrote.
     fn synced_nodes(&mut self) -> Vec<Node> {
         let count = self.call(feature::NODE_SYNC, 0, 0) as usize;
-        let mut nodes = Vec::with_capacity(count);
-        let mut at = 0usize;
-        for _ in 0..count {
-            let id = NodeId::new(self.out[at]);
-            let mut m = [0.0f32; 6];
-            for (i, slot) in m.iter_mut().enumerate() {
-                *slot = f32::from_bits(self.out[at + 1 + i]);
-            }
-            let fill_word = self.out[at + 7];
-            let group_word = self.out[at + 9];
-            let path_words = self.out[at + 10] as usize;
-            let mut consumed = 0;
-            let path = decode_path(&self.out[at + NODE_RECORD_HEADER..], 0, &mut consumed)
-                .expect("record path decodes");
-            assert_eq!(consumed, path_words, "record path length agrees");
-            let mut node = Node::new(
-                id,
-                path,
-                [
-                    (fill_word >> 24) as u8,
-                    (fill_word >> 16) as u8,
-                    (fill_word >> 8) as u8,
-                    fill_word as u8,
-                ],
-            );
-            node.transform = Affine::new(m);
-            node.visible = self.out[at + 8] != 0;
-            node.group = (group_word != 0).then(|| GroupId::new(group_word));
-            nodes.push(node);
-            at += NODE_RECORD_HEADER + path_words;
-        }
-        nodes
+        read_records(&self.out, count)
     }
+}
+
+/// Decodes `count` node records from a word table.
+///
+/// The layout is the one both `NODE_SYNC` and `SVG_NODES` write: a header, then
+/// the node's path blob with its word count in the header.
+fn read_records(out: &[u32], count: usize) -> Vec<Node> {
+    let mut nodes = Vec::with_capacity(count);
+    let mut at = 0usize;
+    for _ in 0..count {
+        let id = NodeId::new(out[at]);
+        let mut m = [0.0f32; 6];
+        for (i, slot) in m.iter_mut().enumerate() {
+            *slot = f32::from_bits(out[at + 1 + i]);
+        }
+        let fill_word = out[at + 7];
+        let group_word = out[at + 9];
+        let path_words = out[at + 10] as usize;
+        let mut consumed = 0;
+        let path = decode_path(&out[at + NODE_RECORD_HEADER..], 0, &mut consumed)
+            .expect("record path decodes");
+        assert_eq!(consumed, path_words, "record path length agrees");
+        let mut node = Node::new(
+            id,
+            path,
+            [
+                (fill_word >> 24) as u8,
+                (fill_word >> 16) as u8,
+                (fill_word >> 8) as u8,
+                fill_word as u8,
+            ],
+        );
+        node.transform = Affine::new(m);
+        node.visible = out[at + 8] != 0;
+        node.group = (group_word != 0).then(|| GroupId::new(group_word));
+        nodes.push(node);
+        at += NODE_RECORD_HEADER + path_words;
+    }
+    nodes
 }
 
 /// Deterministic xorshift so the property checks are reproducible.
@@ -278,9 +287,11 @@ fn every_documented_feature_has_an_answer() {
             "feature {feature_number} is declared but not dispatched"
         );
         // Everything that touches a document must be gated on one existing —
-        // the three features that do not care are listed explicitly.
+        // the features that do not care are listed explicitly. `SVG_NODES` reads
+        // a file, not a document, which is the whole point of it: the host has
+        // to be able to parse an icon before it has anywhere to put it.
         match feature_number {
-            feature::VERSION | feature::CLOSE | feature::ERROR => {}
+            feature::VERSION | feature::CLOSE | feature::ERROR | feature::SVG_NODES => {}
             other => assert_eq!(
                 code, ERR_NO_DOCUMENT,
                 "feature {other} must refuse to run without a document"
@@ -937,7 +948,7 @@ fn random_walk(h: &mut Harness, rng: &mut Rng, iterations: u32) -> u32 {
             );
         }
 
-        let command = match rng.below(15) {
+        let command = match rng.below(19) {
             0 => Command::Translate {
                 dx: rng.unit() * 20.0 - 10.0,
                 dy: rng.unit() * 20.0 - 10.0,
@@ -994,6 +1005,70 @@ fn random_walk(h: &mut Harness, rng: &mut Rng, iterations: u32) -> u32 {
             },
             12 => Command::Group,
             13 => Command::Ungroup,
+            // 4C: point editing and booleans, so the Phase 4 exit criterion
+            // covers the newest geometry too. Addresses are drawn from the
+            // geometry that exists right now.
+            14 => match random_address(h, rng) {
+                Some((id, subpath, _, count)) => Command::MovePoint {
+                    id,
+                    at: VertexRef::new(subpath, rng.below(count as u32 + 1) as usize),
+                    to: (rng.unit() * 60.0 - 10.0, rng.unit() * 60.0 - 10.0),
+                },
+                None => continue,
+            },
+            15 => match random_address(h, rng) {
+                Some((id, subpath, segment, _)) => Command::InsertPoint {
+                    id,
+                    at: SegmentRef::new(subpath, segment),
+                    t: 0.05 + rng.unit() * 0.9,
+                },
+                None => continue,
+            },
+            16 => match random_address(h, rng) {
+                Some((id, subpath, segment, count)) => {
+                    if rng.below(2) == 1 {
+                        Command::DeletePoint {
+                            id,
+                            at: VertexRef::new(subpath, rng.below(count as u32 + 1) as usize),
+                        }
+                    } else {
+                        Command::SetSegment {
+                            id,
+                            at: SegmentRef::new(subpath, segment),
+                            to: if rng.below(2) == 1 {
+                                SegKind::Cubic
+                            } else {
+                                SegKind::Line
+                            },
+                        }
+                    }
+                }
+                None => continue,
+            },
+            17 => match random_address(h, rng) {
+                Some((id, subpath, segment, _)) => Command::MoveHandle {
+                    id,
+                    at: HandleRef::new(
+                        subpath,
+                        segment,
+                        if rng.below(2) == 1 {
+                            Handle::C1
+                        } else {
+                            Handle::C2
+                        },
+                    ),
+                    to: (rng.unit() * 60.0 - 10.0, rng.unit() * 60.0 - 10.0),
+                },
+                None => continue,
+            },
+            18 => {
+                if h.abi.editor().selection().len() < 2 {
+                    continue;
+                }
+                Command::Boolean {
+                    op: BooleanOp::ALL[rng.below(4) as usize],
+                }
+            }
             _ => Command::Translate { dx: 3.0, dy: -2.0 },
         };
 
@@ -1034,18 +1109,315 @@ fn random_walk(h: &mut Harness, rng: &mut Rng, iterations: u32) -> u32 {
     applied
 }
 
+/// A random *valid* point address in the document: `(node, subpath, segment,
+/// how many segments that subpath has)`.
+///
+/// The walk addresses points against the geometry that exists at that moment,
+/// so most of its point edits land instead of being refused for an impossible
+/// address — the refusals are checked separately, by the bad-address tests.
+fn random_address(h: &Harness, rng: &mut Rng) -> Option<(NodeId, usize, usize, usize)> {
+    let doc = h.abi.editor().doc()?;
+    let mut candidates: Vec<(NodeId, usize, usize, usize)> = Vec::new();
+    for node in doc.nodes() {
+        for (subpath, sub) in node.path.iter().enumerate() {
+            for segment in 0..sub.segs.len() {
+                candidates.push((node.id, subpath, segment, sub.segs.len()));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    Some(candidates[rng.below(candidates.len() as u32) as usize])
+}
+
+// ---------------------------------------------------------------------------
+// 4C: point editing, booleans and SVG import over the wire
+// ---------------------------------------------------------------------------
+
+#[test]
+fn point_edits_travel_as_command_specs_and_undo_exactly() {
+    let mut h = Harness::new();
+    h.load(&fixture_doc());
+    // Node 1 is a 20-unit square starting at (10,10).
+    h.call(feature::SELECT_ONLY, 1, 0);
+    let node = |h: &Harness| h.abi.editor().doc().unwrap().node(NodeId::new(1)).cloned();
+
+    // Every 4C opcode round-trips through `encode_command` / `decode_command`.
+    let before = node(&h);
+    let edits = [
+        Command::MovePoint {
+            id: NodeId::new(1),
+            at: VertexRef::new(0, 1),
+            to: (35.0, 12.0),
+        },
+        Command::InsertPoint {
+            id: NodeId::new(1),
+            at: SegmentRef::new(0, 0),
+            t: 0.5,
+        },
+        Command::SetSegment {
+            id: NodeId::new(1),
+            at: SegmentRef::new(0, 1),
+            to: SegKind::Cubic,
+        },
+        Command::MoveHandle {
+            id: NodeId::new(1),
+            at: HandleRef::new(0, 1, Handle::C1),
+            to: (40.0, 5.0),
+        },
+        Command::DeletePoint {
+            id: NodeId::new(1),
+            at: VertexRef::new(0, 2),
+        },
+    ];
+    let mut states = vec![before.clone()];
+    for command in &edits {
+        let ops = h.apply(command);
+        assert!(ops > 0, "{command:?} should have landed");
+        assert_eq!(h.error(), ERR_NONE, "{command:?}");
+        states.push(node(&h));
+        // The geometry really changed: an edit that was silently dropped would
+        // make the undo check below vacuous.
+        assert_ne!(states[states.len() - 1], states[states.len() - 2]);
+    }
+    assert_eq!(h.call(feature::HISTORY_LEN, 0, 0), edits.len() as u32);
+    for (step, want) in states.iter().enumerate().rev().skip(1) {
+        assert!(h.call(feature::UNDO, 0, 0) > 0);
+        let _ = step;
+        assert_eq!(&node(&h), want);
+    }
+    for _ in 0..edits.len() {
+        assert!(h.call(feature::REDO, 0, 0) > 0);
+    }
+    assert_eq!(node(&h), states[states.len() - 1]);
+
+    // Bad addresses and bad arguments are refused, never guessed.
+    for spec in [
+        vec![abi::OP_MOVE_POINT, 1, 9, 0, 0, 0],
+        vec![abi::OP_MOVE_POINT, 1, 0, 99, 0, 0],
+        vec![abi::OP_INSERT_POINT, 1, 0, 0, 0f32.to_bits()],
+        vec![abi::OP_INSERT_POINT, 1, 0, 0],
+        vec![abi::OP_SET_SEGMENT, 1, 0, 0, 9],
+        vec![abi::OP_MOVE_HANDLE, 1, 0, 0, 7, 0, 0],
+        vec![abi::OP_DELETE_POINT, 1, 4, 0],
+        vec![abi::OP_BOOLEAN, 9],
+    ] {
+        h.put(&spec, 0);
+        let value = h.call(feature::APPLY_SPEC, 0, 0);
+        assert_eq!(value, 0, "spec {spec:?} must be refused");
+        assert_ne!(h.error(), ERR_NONE, "spec {spec:?} must report why");
+    }
+    assert_eq!(
+        node(&h),
+        states[states.len() - 1],
+        "refusals changed nothing"
+    );
+    eprintln!(
+        "evidence: editor ABI v{ABI_VERSION} — {} point-edit opcodes round-trip through the \
+         wire with exact undo/redo, {} malformed specs refused",
+        edits.len(),
+        8
+    );
+}
+
+#[test]
+fn booleans_combine_the_selection_over_the_wire() {
+    let mut h = Harness::new();
+    let mut doc = Doc::new(200.0, 200.0);
+    doc.add(vec![square(0.0, 0.0, 40.0)], [255, 0, 0, 255]);
+    doc.add(vec![square(20.0, 20.0, 40.0)], [0, 255, 0, 255]);
+    let mut untouched = Node::new(
+        NodeId::new(3),
+        vec![square(120.0, 120.0, 10.0)],
+        [0, 0, 255, 255],
+    );
+    untouched.transform = Affine::translate(5.0, 5.0);
+    doc.insert_at(2, untouched);
+    h.load(&doc);
+
+    let bounds = |h: &Harness| {
+        h.abi
+            .editor()
+            .doc()
+            .unwrap()
+            .node(NodeId::new(1))
+            .and_then(|n| n.bounds())
+    };
+    let expected = [
+        // union: both squares, 40 wide plus the 20-unit offset
+        (BooleanOp::Union, (60.0, 60.0)),
+        (BooleanOp::Subtract, (40.0, 40.0)),
+        (BooleanOp::Intersect, (20.0, 20.0)),
+        (BooleanOp::Exclude, (60.0, 60.0)),
+    ];
+    for (op, (w, hgt)) in expected {
+        h.call(feature::SELECT_ONLY, 1, 0);
+        h.call(feature::SELECT_ADD, 2, 0);
+        let before = h.view();
+        let ops = h.apply(&Command::Boolean { op });
+        assert!(ops > 0, "{op:?} should have landed");
+        let (lo, hi) = bounds(&h).expect("the result has geometry");
+        assert!(
+            (hi.x - lo.x - w).abs() < 0.01 && (hi.y - lo.y - hgt).abs() < 0.01,
+            "{op:?} produced a {}x{} box, wanted {w}x{hgt}",
+            hi.x - lo.x,
+            hi.y - lo.y
+        );
+        // The untouched node is still there, with its own placement.
+        assert_eq!(h.call(feature::NODE_COUNT, 0, 0), 2);
+        assert!(h.call(feature::UNDO, 0, 0) > 0);
+        assert_eq!(h.view(), before, "{op:?} did not undo exactly");
+    }
+    // A boolean on one node is a no-op, and on none is a selection error.
+    h.call(feature::SELECT_ONLY, 1, 0);
+    assert_eq!(
+        h.apply(&Command::Boolean {
+            op: BooleanOp::Union
+        }),
+        0
+    );
+    assert_eq!(h.error(), ERR_NO_OP);
+    h.call(feature::SELECT_CLEAR, 0, 0);
+    assert_eq!(
+        h.apply(&Command::Boolean {
+            op: BooleanOp::Union
+        }),
+        0
+    );
+    assert_eq!(h.error(), ERR_NO_SELECTION);
+    eprintln!(
+        "evidence: editor ABI v{ABI_VERSION} — boolean opcodes 0..=3 combine the selection into \
+         one node through the wire (union 60x60, subtract 40x40, intersect 20x20), each undoing \
+         exactly, with the fifth node untouched"
+    );
+}
+
+/// Packs an SVG plus its spec into the input table and returns the spec offset.
+fn put_svg(h: &mut Harness, text: &str, first_id: u32, placement: Affine, fill: [u8; 4]) -> u32 {
+    let mut words = vec![first_id];
+    words.extend(placement.to_array().iter().map(|m| m.to_bits()));
+    words.push(abi::pack_rgba(fill));
+    words.push(text.len() as u32);
+    for chunk in text.as_bytes().chunks(4) {
+        let mut word = 0u32;
+        for (i, byte) in chunk.iter().enumerate() {
+            word |= u32::from(*byte) << (8 * i);
+        }
+        words.push(word);
+    }
+    h.put(&words, 0);
+    0
+}
+
+#[test]
+fn svg_text_crosses_the_wire_for_reading_and_importing() {
+    let svg = r##"<svg viewBox="0 0 32 32">
+        <path d="M4,4 L28,4 L28,28 L4,28 Z" fill="#123456"/>
+        <g transform="translate(2,2)"><path d="M8,8 C12,4 20,4 24,8"/></g>
+      </svg>"##;
+    let mut h = Harness::new();
+
+    // Reading needs no document: that is how the store turns a vectorizer's
+    // output into geometry before it has anywhere to put it. The records land in
+    // the output table, so they are read straight out of it.
+    let at = put_svg(&mut h, svg, 7, Affine::IDENTITY, [0, 0, 0, 255]);
+    let count = h.call(feature::SVG_NODES, at, 0);
+    assert_eq!(h.error(), ERR_NONE);
+    assert_eq!(count, 2);
+    let records = read_records(&h.out, count as usize);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].id.get(), 7);
+    assert_eq!(records[1].id.get(), 8);
+    assert_eq!(records[0].fill, [0x12, 0x34, 0x56, 255]);
+    assert_eq!(records[1].fill, [0, 0, 0, 255], "the caller's default fill");
+    assert_eq!(records[0].path.len(), 1);
+    assert_eq!(records[0].path[0].segs.len(), 3);
+    assert_eq!(records[1].transform.apply(0.0, 0.0), (2.0, 2.0));
+
+    // Importing adds them to the document as one step, with the caller's
+    // placement, and selects them.
+    h.load(&Doc::new(100.0, 100.0));
+    let at = put_svg(
+        &mut h,
+        svg,
+        1,
+        Affine::translate(10.0, 20.0),
+        [9, 9, 9, 255],
+    );
+    assert_eq!(h.call(feature::IMPORT_SVG, at, 0), 2);
+    assert_eq!(h.error(), ERR_NONE);
+    assert_eq!(h.call(feature::NODE_COUNT, 0, 0), 2);
+    assert_eq!(h.call(feature::HISTORY_LEN, 0, 0), 1);
+    let count = h.call(feature::NODE_SYNC, 0, 0) as usize;
+    let imported = read_records(&h.out, count);
+    assert_eq!(imported[0].id.get(), 1);
+    assert_eq!(imported[0].transform.apply(0.0, 0.0), (10.0, 20.0));
+    assert_eq!(imported[1].transform.apply(0.0, 0.0), (12.0, 22.0));
+    // Text features answer with the byte length of the label they stashed and
+    // leave the bytes in the output table for the host to read.
+    let bytes = h.call(feature::LAST_LABEL, 0, 0) as usize;
+    assert_eq!(bytes, "import svg".len());
+    assert_eq!(h.label(bytes), "import svg");
+    assert!(h.call(feature::UNDO, 0, 0) > 0);
+    assert_eq!(h.call(feature::NODE_COUNT, 0, 0), 0);
+    assert!(h.call(feature::REDO, 0, 0) > 0);
+    assert_eq!(h.call(feature::NODE_COUNT, 0, 0), 2);
+
+    // Malformed text, and text that draws nothing, are reported as such.
+    let at = put_svg(
+        &mut h,
+        r##"<svg><path d="M0,0 B1,1"/></svg>"##,
+        1,
+        Affine::IDENTITY,
+        [0; 4],
+    );
+    assert_eq!(h.call(feature::SVG_NODES, at, 0), 0);
+    assert_eq!(h.error(), abi::ERR_MALFORMED_SVG);
+    let at = put_svg(&mut h, "<svg><body/></svg>", 1, Affine::IDENTITY, [0; 4]);
+    assert_eq!(h.call(feature::SVG_NODES, at, 0), 0);
+    assert_eq!(h.error(), ERR_NONE, "an empty drawing is not an error");
+    assert_eq!(h.call(feature::IMPORT_SVG, at, 0), 0);
+    assert_eq!(h.error(), ERR_NO_OP);
+    // A placement that is not invertible is refused, and so is a text spec that
+    // runs past the end of the input table.
+    let at = put_svg(&mut h, svg, 1, Affine::scale(0.0, 1.0), [0; 4]);
+    assert_eq!(h.call(feature::IMPORT_SVG, at, 0), 0);
+    assert_eq!(h.error(), ERR_DEGENERATE);
+    assert_eq!(h.call(feature::SVG_NODES, IN_WORDS as u32 - 2, 0), 0);
+    assert_eq!(h.error(), ERR_BAD_ARGUMENT);
+
+    // The node cap is enforced before the import is applied: an SVG with one
+    // path too many changes nothing at all.
+    let mut many = String::from("<svg>");
+    for i in 0..=MAX_NODES {
+        many.push_str(&format!(r##"<path d="M0,0 L{}.0,0"/>"##, i % 8));
+    }
+    many.push_str("</svg>");
+    let at = put_svg(&mut h, &many, 1, Affine::IDENTITY, [0; 4]);
+    assert_eq!(h.call(feature::IMPORT_SVG, at, 0), 0);
+    assert_eq!(h.error(), ERR_CAPACITY);
+    assert_eq!(h.call(feature::NODE_COUNT, 0, 0), 2, "nothing was applied");
+    eprintln!(
+        "evidence: editor ABI v{ABI_VERSION} — SVG text crosses the wire both ways: {}-byte file \
+         parsed to 2 node records without a document, imported as one step (undo/redo exact), \
+         malformed text and the {MAX_NODES}-node cap refused before anything was applied",
+        svg.len()
+    );
+}
+
 #[test]
 fn property_undo_do_is_identity_over_random_sequences() {
     let mut h = Harness::new();
     h.load(&fixture_doc());
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
-    let applied = random_walk(&mut h, &mut rng, 4000);
+    let applied = random_walk(&mut h, &mut rng, 10_000);
     assert!(
-        applied > 2000,
+        applied > 5000,
         "the walk must actually exercise the engine, applied {applied}"
     );
     eprintln!(
-        "evidence: editor property (host ABI) — {applied} edits landed over 4000 \
+        "evidence: editor property (host ABI) — {applied} edits landed over 10000 \
          randomised sequences, zero undo/redo divergences"
     );
 }

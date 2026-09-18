@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { KIND, type NodeSpec } from "../../wasm/abi";
+
 import {
   applyAffine,
   boxAfterCommand,
@@ -10,6 +12,12 @@ import {
   hitHandle,
   isDrag,
   marqueeBox,
+  cubicAt,
+  hitPoint,
+  hitSegment,
+  invertAffine,
+  nodePoints,
+  nodeWithPointMoved,
   rotateCommandFor,
   scaleCommandFor,
   snapFlags,
@@ -217,5 +225,140 @@ describe("local previews", () => {
     expect(snapFlags({ ...SNAP_DEFAULTS, canvas: false, nodes: false })).toBe(0);
     expect(SNAP_DEFAULTS.gridStep).toBe(8);
     expect(SNAP_DEFAULTS.tolerance).toBeGreaterThan(0);
+  });
+});
+
+describe("node editing", () => {
+  const SQUARE: NodeSpec = {
+    id: 1,
+    m: [1, 0, 0, 1, 0, 0],
+    fill: [255, 255, 255, 255],
+    visible: true,
+    path: [
+      {
+        start: { x: 10, y: 10 },
+        closed: true,
+        segs: [
+          { kind: KIND.LINE, to: { x: 30, y: 10 } },
+          { kind: KIND.LINE, to: { x: 30, y: 30 } },
+          { kind: KIND.LINE, to: { x: 10, y: 30 } },
+        ],
+      },
+    ],
+  };
+
+  const CURVE: NodeSpec = {
+    ...SQUARE,
+    id: 2,
+    path: [
+      {
+        start: { x: 0, y: 0 },
+        closed: false,
+        segs: [
+          {
+            kind: KIND.CUBIC,
+            c1: { x: 0, y: 10 },
+            c2: { x: 10, y: 10 },
+            to: { x: 10, y: 0 },
+          },
+        ],
+      },
+    ],
+  };
+
+  it("lists every vertex, then the control handles of the cubics", () => {
+    const points = nodePoints(SQUARE);
+    // Four vertices of a closed square, no handles (all three segments are lines).
+    expect(points).toHaveLength(4);
+    expect(points.map((point) => point.at.of)).toEqual(["vertex", "vertex", "vertex", "vertex"]);
+    expect(points[3].to).toEqual({ x: 10, y: 30 });
+
+    const curve = nodePoints(CURVE);
+    expect(curve).toHaveLength(4); // start, end, c1, c2
+    expect(curve[2].at).toEqual({ of: "handle", subpath: 0, segment: 0, handle: "c1" });
+    // A handle is drawn as a lever from the vertex it turns about.
+    expect(curve[2].from).toEqual({ x: 0, y: 0 });
+    expect(curve[3].from).toEqual({ x: 10, y: 0 });
+    expect(curve[3].to).toEqual({ x: 10, y: 10 });
+  });
+
+  it("prefers a vertex over a handle when both are in reach", () => {
+    const points = nodePoints(CURVE);
+    // (0, 0) is the start vertex and the c1 lever's anchor: the vertex wins.
+    expect(hitPoint(points, { x: 0.5, y: 0.5 })?.at).toEqual({
+      of: "vertex",
+      subpath: 0,
+      vertex: 0,
+    });
+    // Just outside the grab radius of anything is nothing.
+    expect(hitPoint(points, { x: 5, y: 5 })).toBeNull();
+  });
+
+  it("finds the nearest place on an outline for an insert", () => {
+    const onLine = hitSegment(SQUARE, { x: 20, y: 10.2 });
+    expect(onLine).toEqual({ of: "segment", subpath: 0, segment: 0, t: 0.5 });
+
+    const onCurve = hitSegment(CURVE, { x: 5, y: 7.5 });
+    if (!onCurve) throw new Error("the curve is within reach");
+    expect(onCurve.segment).toBe(0);
+    // The parameter stays strictly inside the segment, because the engine's
+    // `insertPoint` refuses the segment's own ends.
+    expect(onCurve.t).toBeGreaterThan(0);
+    expect(onCurve.t).toBeLessThan(1);
+    expect(cubicAt({ x: 0, y: 0 }, { x: 0, y: 10 }, { x: 10, y: 10 }, { x: 10, y: 0 }, onCurve.t).y)
+      .toBeCloseTo(7.5, 1);
+
+    // An outline that is nowhere near is not a hit.
+    expect(hitSegment(SQUARE, { x: 100, y: 100 })).toBeNull();
+  });
+
+  it("moves the point the drag grabbed, and the handles that hang off it", () => {
+    // Moving a middle vertex drags the incoming and outgoing handles with it.
+    const moved = nodeWithPointMoved(CURVE, { of: "vertex", subpath: 0, vertex: 1 }, { x: 20, y: 5 });
+    const seg = moved.path[0].segs[0];
+    if (seg.kind !== KIND.CUBIC) throw new Error("the segment is a cubic");
+    expect(seg.to).toEqual({ x: 20, y: 5 });
+    expect(seg.c2).toEqual({ x: 20, y: 15 }); // moved by the same delta as its vertex
+    expect(seg.c1).toEqual({ x: 0, y: 10 }); // untouched: it hangs off the other end
+
+    // Moving the start vertex carries the handle that leaves it.
+    const start = nodeWithPointMoved(CURVE, { of: "vertex", subpath: 0, vertex: 0 }, { x: -5, y: 2 });
+    const first = start.path[0].segs[0];
+    if (first.kind !== KIND.CUBIC) throw new Error("the segment is a cubic");
+    expect(start.path[0].start).toEqual({ x: -5, y: 2 });
+    expect(first.c1).toEqual({ x: -5, y: 12 });
+
+    // A line segment has no handles to drag, so only its end moves.
+    const line = nodeWithPointMoved(SQUARE, { of: "vertex", subpath: 0, vertex: 1 }, { x: 40, y: 12 });
+    expect(line.path[0].segs[0]).toEqual({ kind: KIND.LINE, to: { x: 40, y: 12 } });
+    expect(line.path[0].segs[1].to).toEqual({ x: 30, y: 30 });
+
+    // A handle drag moves only that handle.
+    const handle = nodeWithPointMoved(
+      CURVE,
+      { of: "handle", subpath: 0, segment: 0, handle: "c2" },
+      { x: 12, y: 14 },
+    );
+    const dragged = handle.path[0].segs[0];
+    if (dragged.kind !== KIND.CUBIC) throw new Error("the segment is a cubic");
+    expect(dragged.c2).toEqual({ x: 12, y: 14 });
+    expect(dragged.c1).toEqual({ x: 0, y: 10 });
+  });
+
+  it("works in the node's own space when the node is transformed", () => {
+    // The path is local; the document-space point comes back through the
+    // inverse of the node's affine, so a scaled node still lands under the
+    // pointer.
+    const scaled: NodeSpec = { ...SQUARE, m: [2, 0, 0, 2, 5, 5] };
+    expect(nodePoints(scaled)[1].to).toEqual({ x: 65, y: 25 });
+    const moved = nodeWithPointMoved(scaled, { of: "vertex", subpath: 0, vertex: 1 }, { x: 65, y: 25 });
+    expect(moved.path[0].segs[0].to).toEqual({ x: 30, y: 10 }); // local coordinates
+
+    // A collapsed affine has no inverse to write through, so nothing is
+    // guessed: the drag writes the document-space point unchanged.
+    const flat: NodeSpec = { ...SQUARE, m: [0, 0, 0, 0, 1, 1] };
+    expect(invertAffine(flat.m as [number, number, number, number, number, number], { x: 9, y: 9 })).toBeNull();
+    expect(nodeWithPointMoved(flat, { of: "vertex", subpath: 0, vertex: 1 }, { x: 9, y: 9 }).path[0].segs[0].to)
+      .toEqual({ x: 9, y: 9 });
   });
 });

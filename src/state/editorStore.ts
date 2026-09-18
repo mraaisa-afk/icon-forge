@@ -20,19 +20,23 @@ import type {
   AlignEdge,
   AlignFrame,
   ArrangeTo,
+  BooleanOp,
   Box,
   EditorCommand,
   NodeSpec,
+  PointAddress,
   Rgba,
+  SegmentAddress,
   SnapGuide,
+  VertexAddress,
 } from "../wasm/abi";
 import { EditorSession, type HistoryView } from "../wasm/editor";
 import {
   SNAP_DEFAULTS,
   snapFlags,
+  type Affine,
   type SnapSettings,
 } from "../components/editor/canvasModel";
-import { parsePathData, readSvgPaths } from "../wasm/svgPath";
 import { backend, type Box4, type SheetDto } from "../lib/backend";
 
 /** How many icons one editor session loads (the rest is 4B work). */
@@ -148,6 +152,18 @@ export interface EditorState {
   resize: (size: { width?: number; height?: number }) => void;
   /** Turns the selection about its centre. */
   rotate: (degrees: number) => void;
+
+  // -- 4C: node editing, booleans, SVG import --------------------------------
+  /** Combines the selection into one node with a pathfinder operation. */
+  booleanOp: (op: BooleanOp) => void;
+  /** Imports SVG text into the open document, one node per path. */
+  importSvg: (text: string) => void;
+  /** One 4C point edit; the address identifies the point inside `node`. */
+  editPoint: (node: number, at: PointAddress, to: { x: number; y: number } | null) => void;
+  /** Converts a segment between a line and a cubic. */
+  setSegment: (node: number, at: SegmentAddress, to: "line" | "cubic") => void;
+  /** Deletes a vertex, joining its neighbours. */
+  deletePoint: (node: number, at: VertexAddress) => void;
 }
 
 /** The live session, outside React state: it is not serialisable and never rendered. */
@@ -158,18 +174,26 @@ export function editorSession(): EditorSession | null {
   return session;
 }
 
-/** Turns a traced SVG into one node's geometry (all of its paths, unioned). */
-export function nodeFromSvg(id: number, svg: string): NodeSpec | null {
-  const elements = readSvgPaths(svg);
-  const path = elements.flatMap((element) => parsePathData(element.d));
-  if (path.length === 0) return null;
-  return {
-    id,
-    m: [1, 0, 0, 1, 0, 0],
-    fill: elements.find((element) => element.fill)?.fill ?? DEFAULT_FILL,
-    visible: true,
-    path,
-  };
+/** The identity transform, as the ABI's `m`. */
+const IDENTITY: Affine = [1, 0, 0, 1, 0, 0];
+
+/**
+ * Turns an SVG into nodes, one per `<path>` in the file, numbered from `firstId`.
+ *
+ * The *engine* parses the file (4A's TypeScript parser is retired — see
+ * `ARCHITECTURE.md` §3.9), so a traced outline is read by exactly the code that
+ * draws it, and each shape keeps its own colour and its own transform (which
+ * rides on the node's `m`, exactly as for any other node). A file the engine
+ * refuses, or one that draws nothing, yields no nodes rather than an empty icon.
+ *
+ * A traced icon arrives as one path per colour layer, so callers that think in
+ * icons group the result (see `open`) rather than merging the geometry: layers
+ * overlap, and cramming them into one node would fill their intersections as
+ * holes.
+ */
+export function nodesFromSvg(session: EditorSession, firstId: number, svg: string): NodeSpec[] {
+  const parsed = session.svgNodes(svg, firstId, IDENTITY, DEFAULT_FILL);
+  return parsed.ok ? parsed.value : [];
 }
 
 export const useEditor = create<EditorState>((set, get) => {
@@ -244,11 +268,18 @@ export const useEditor = create<EditorState>((set, get) => {
         const wanted = boxes.slice(0, EDITOR_ICON_LIMIT);
         const api = await backend();
         const nodes: NodeSpec[] = [];
+        let icons = 0;
         for (const box of wanted) {
           const [x, y, w, h] = box;
           const { svg } = await api.vectorizeIcon(sheet.id, x, y, w, h, EDITOR_PRESET);
-          const node = nodeFromSvg(nodes.length + 1, svg);
-          if (node) nodes.push(node);
+          const parsed = nodesFromSvg(session, nodes.length + 1, svg);
+          if (parsed.length === 0) continue;
+          icons += 1;
+          // An icon is one thing to move, however many layers it is drawn in:
+          // a multi-path icon is loaded as a group, so a click selects the whole
+          // icon and ungrouping hands the layers back for editing.
+          if (parsed.length > 1) for (const node of parsed) node.group = icons;
+          nodes.push(...parsed);
         }
         if (nodes.length === 0) {
           set({
@@ -266,8 +297,8 @@ export const useEditor = create<EditorState>((set, get) => {
         set({
           status: "ready",
           error: null,
-          note: `${nodes.length} icon${nodes.length === 1 ? "" : "s"} ready · drag to move, drag empty space to select`,
-          loadedIcons: nodes.length,
+          note: `${icons} icon${icons === 1 ? "" : "s"} ready (${nodes.length} node${nodes.length === 1 ? "" : "s"}) · drag to move, drag empty space to select`,
+          loadedIcons: icons,
           availableIcons: boxes.length,
         });
         sync();
@@ -493,6 +524,51 @@ export const useEditor = create<EditorState>((set, get) => {
       }
       const pivot = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
       edit({ kind: "rotate", degrees, pivot }, "rotate");
+    },
+
+    // -- 4C: node editing, booleans, SVG import ------------------------------
+
+    booleanOp(op) {
+      if (!session) return;
+      if (get().selection.length < 2) {
+        set({ note: "a boolean needs two or more shapes" });
+        return;
+      }
+      edit({ kind: "boolean", op }, op);
+    },
+
+    importSvg(text) {
+      if (!session) return;
+      const result = session.importSvg(text, IDENTITY, DEFAULT_FILL);
+      set({
+        note: result.ok
+          ? `imported ${result.value} shape${result.value === 1 ? "" : "s"}`
+          : result.message,
+      });
+      sync();
+    },
+
+    editPoint(node, at, to) {
+      if (!session) return;
+      if (at.of === "vertex") {
+        // With a target the vertex moves; without one the gesture is a delete.
+        if (to) edit({ kind: "movePoint", node, at, to }, "point");
+        else edit({ kind: "deletePoint", node, at }, "delete point");
+        return;
+      }
+      if (at.of === "handle") {
+        if (to) edit({ kind: "moveHandle", node, at, to }, "handle");
+        return;
+      }
+      edit({ kind: "insertPoint", node, at }, "insert point");
+    },
+
+    setSegment(node, at, to) {
+      edit({ kind: "setSegment", node, at, to }, `segment ${to}`);
+    },
+
+    deletePoint(node, at) {
+      edit({ kind: "deletePoint", node, at }, "delete point");
     },
   };
 });

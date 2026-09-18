@@ -619,11 +619,31 @@ impl Editor {
             return Err(CommandError::DegenerateTransform);
         }
         let parsed = svg::parse(text).map_err(|_| CommandError::MalformedSvg)?;
-        if parsed.shapes.is_empty() {
+        self.add_shapes(&parsed.shapes, placement, fill)
+    }
+
+    /// Adds already-parsed SVG shapes as nodes — the half of [`Editor::import_svg`]
+    /// that touches the document.
+    ///
+    /// A caller that has to check its own limits before committing (the ABI's
+    /// node cap) parses once and calls this, rather than parsing twice or
+    /// applying an import it will not keep.
+    ///
+    /// # Errors
+    ///
+    /// As [`Editor::import_svg`], minus the malformed-text case.
+    pub fn add_shapes(
+        &mut self,
+        shapes: &[svg::SvgShape],
+        placement: Affine,
+        fill: [u8; 4],
+    ) -> Result<Vec<NodeId>, CommandError> {
+        if !placement.is_finite() || placement.invert().is_none() {
+            return Err(CommandError::DegenerateTransform);
+        }
+        if shapes.is_empty() {
             return Err(CommandError::NoOp);
         }
-        let shapes = &parsed.shapes;
-
         let doc = self.doc.as_ref().ok_or(CommandError::NoDocument)?;
         let count = doc.node_count();
         let mut forward = Vec::with_capacity(shapes.len());

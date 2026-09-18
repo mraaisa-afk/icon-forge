@@ -82,6 +82,8 @@ export const FEATURE = {
   CLOSE: 36,
   SNAP: 37,
   PREVIEW: 38,
+  SVG_NODES: 39,
+  IMPORT_SVG: 40,
 } as const;
 
 /** Command spec opcodes — see `abi::OP_*`. */
@@ -100,6 +102,12 @@ export const OP = {
   ARRANGE: 12,
   ALIGN: 13,
   SCALE_XY: 14,
+  MOVE_POINT: 15,
+  MOVE_HANDLE: 16,
+  INSERT_POINT: 17,
+  DELETE_POINT: 18,
+  SET_SEGMENT: 19,
+  BOOLEAN: 20,
 } as const;
 
 /** `SNAP` input flags: which target families snapping may use. */
@@ -178,6 +186,7 @@ export const ERR = {
   TRANSPARENT: 8,
   NO_OP: 9,
   MISSING_NODE: 10,
+  MALFORMED_SVG: 11,
 } as const;
 
 /** Human-readable text for an error code (status line, dev console). */
@@ -192,10 +201,67 @@ export const ERR_TEXT: Record<number, string> = {
   [ERR.TRANSPARENT]: "a fully transparent fill would be invisible",
   [ERR.NO_OP]: "nothing would change",
   [ERR.MISSING_NODE]: "that node no longer exists",
+  [ERR.MALFORMED_SVG]: "that file is not readable svg",
 };
 
 /** Segment kinds. */
 export const KIND = { LINE: 0, CUBIC: 1 } as const;
+
+/** The four pathfinder operations (4C). */
+export type BooleanOp = "union" | "subtract" | "intersect" | "exclude";
+
+/** Raw wire values for [`BooleanOp`] — see `BooleanOp::raw` in `isg-core`. */
+export const BOOLEAN_RAW: Record<BooleanOp, number> = {
+  union: 0,
+  subtract: 1,
+  intersect: 2,
+  exclude: 3,
+};
+
+/** The four operations in the order the UI offers them. */
+export const BOOLEAN_OPS: readonly BooleanOp[] = ["union", "subtract", "intersect", "exclude"];
+
+/** A segment's shape, as `setSegment` names it. */
+export type SegmentKind = "line" | "cubic";
+
+/** Raw wire values for [`SegmentKind`]. */
+export const SEGMENT_KIND_RAW: Record<SegmentKind, number> = { line: KIND.LINE, cubic: KIND.CUBIC };
+
+/** Which of a cubic's two control handles is being dragged. */
+export type HandleSlot = "c1" | "c2";
+
+/** Raw wire values for [`HandleSlot`]. */
+export const HANDLE_RAW: Record<HandleSlot, number> = { c1: 0, c2: 1 };
+
+/** A vertex of a subpath: `0` is the start, `k` the end of segment `k - 1`. */
+export interface VertexAddress {
+  of: "vertex";
+  subpath: number;
+  vertex: number;
+}
+
+/** One of a cubic segment's two control handles. */
+export interface HandleAddress {
+  of: "handle";
+  subpath: number;
+  segment: number;
+  handle: HandleSlot;
+}
+
+/** A place along a segment, at parameter `t` in `(0, 1)`. */
+export interface SegmentAddress {
+  of: "segment";
+  subpath: number;
+  segment: number;
+  t: number;
+}
+
+/**
+ * A point a node edit can address: a vertex, a control handle or a place on a
+ * segment (for `insertPoint`). Every 4C command carries one.
+ */
+export type PointAddress = VertexAddress | HandleAddress | SegmentAddress;
+
 
 /** RGBA, each channel 0–255. */
 export type Rgba = [number, number, number, number];
@@ -275,7 +341,14 @@ export type EditorCommand =
   | { kind: "arrange"; to: ArrangeTo }
   | { kind: "align"; frame: AlignFrame; edge: AlignEdge }
   | { kind: "group" }
-  | { kind: "ungroup" };
+  | { kind: "ungroup" }
+  // 4C: node editing and booleans.
+  | { kind: "movePoint"; node: number; at: VertexAddress; to: Point }
+  | { kind: "moveHandle"; node: number; at: HandleAddress; to: Point }
+  | { kind: "insertPoint"; node: number; at: SegmentAddress }
+  | { kind: "deletePoint"; node: number; at: VertexAddress }
+  | { kind: "setSegment"; node: number; at: SegmentAddress; to: SegmentKind }
+  | { kind: "boolean"; op: BooleanOp };
 
 /** Packs an `f32` into its bit pattern. */
 export function f2w(value: number): number {
@@ -486,6 +559,50 @@ export function encodeCommand(command: EditorCommand): Uint32Array {
       return Uint32Array.from([OP.GROUP]);
     case "ungroup":
       return Uint32Array.from([OP.UNGROUP]);
+    case "movePoint":
+      return Uint32Array.from([
+        OP.MOVE_POINT,
+        command.node,
+        command.at.subpath,
+        command.at.vertex,
+        f2w(command.to.x),
+        f2w(command.to.y),
+      ]);
+    case "moveHandle":
+      return Uint32Array.from([
+        OP.MOVE_HANDLE,
+        command.node,
+        command.at.subpath,
+        command.at.segment,
+        HANDLE_RAW[command.at.handle],
+        f2w(command.to.x),
+        f2w(command.to.y),
+      ]);
+    case "insertPoint":
+      return Uint32Array.from([
+        OP.INSERT_POINT,
+        command.node,
+        command.at.subpath,
+        command.at.segment,
+        f2w(command.at.t),
+      ]);
+    case "deletePoint":
+      return Uint32Array.from([
+        OP.DELETE_POINT,
+        command.node,
+        command.at.subpath,
+        command.at.vertex,
+      ]);
+    case "setSegment":
+      return Uint32Array.from([
+        OP.SET_SEGMENT,
+        command.node,
+        command.at.subpath,
+        command.at.segment,
+        SEGMENT_KIND_RAW[command.to],
+      ]);
+    case "boolean":
+      return Uint32Array.from([OP.BOOLEAN, BOOLEAN_RAW[command.op]]);
   }
 }
 
@@ -536,6 +653,32 @@ export function decodeSnapResult(words: Uint32Array): SnapResult {
 
 /** Words a `SNAP` answer can occupy at most (header + guides + terminator). */
 export const SNAP_ANSWER_WORDS = 3 + MAX_SNAP_GUIDES * GUIDE_WORDS + 1;
+
+/** Words in the SVG spec the `SVG_NODES` / `IMPORT_SVG` features read. */
+export const SVG_SPEC_WORDS = 9;
+
+/**
+ * Encodes the spec both SVG features take.
+ *
+ * The header is the first node id (used only when parsing), the placement, the
+ * default fill and the byte length of the text, which follows packed four bytes
+ * to a word — the same packing `decodeText` reads back.
+ */
+export function encodeSvgSpec(
+  text: string,
+  firstId: number,
+  placement: readonly number[],
+  fill: Rgba,
+): number[] {
+  const bytes = new TextEncoder().encode(text);
+  const words = [firstId, ...placement.map(f2w), packRgba(fill), bytes.length];
+  for (let i = 0; i < bytes.length; i += 4) {
+    let word = 0;
+    for (let j = 0; j < 4 && i + j < bytes.length; j++) word |= bytes[i + j] << (8 * j);
+    words.push(word >>> 0);
+  }
+  return words;
+}
 
 /** Unpacks UTF-8 text from `count` words of the output table. */
 export function decodeText(words: Uint32Array, bytes: number): string {

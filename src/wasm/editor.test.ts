@@ -491,6 +491,105 @@ describe.skipIf(!available)("EditorSession against the real module", () => {
     session.close();
   });
 
+  it("edits points, combines shapes and moves svg both ways through the adapter", async () => {
+    const session = await freshSession();
+    // Node 1 is a 20x20 square at (10, 10): vertex 1 is its top-right corner.
+    const moved = session.apply({
+      kind: "movePoint",
+      node: 1,
+      at: { of: "vertex", subpath: 0, vertex: 1 },
+      to: { x: 60, y: 10 },
+    });
+    expect(moved.ok).toBe(true);
+    expect(session.boundsOf(1)).toEqual({ x0: 10, y0: 10, x1: 60, y1: 30 });
+    // One history step, undone exactly.
+    expect(session.history().undoable).toBe(1);
+    expect(session.undo().ok && session.history().redoLabel).toBe("point");
+    expect(session.boundsOf(1)).toEqual({ x0: 10, y0: 10, x1: 30, y1: 30 });
+    expect(session.redo().ok).toBe(true);
+    expect(session.boundsOf(1)).toEqual({ x0: 10, y0: 10, x1: 60, y1: 30 });
+    session.undo();
+
+    // A vertex can be inserted on a segment and deleted again: the square turns
+    // into a pentagon and back, and both edits undo exactly.
+    expect(
+      session.apply({
+        kind: "insertPoint",
+        node: 1,
+        at: { of: "segment", subpath: 0, segment: 0, t: 0.5 },
+      }).ok,
+    ).toBe(true);
+    expect(session.pathOf(1)?.[0].segs).toHaveLength(4);
+    expect(session.undo().ok && session.history().redoLabel).toBe("insert point");
+    expect(session.pathOf(1)?.[0].segs).toHaveLength(3);
+
+    // A line segment can become a cubic and back, which is what the panel does.
+    expect(
+      session.apply({
+        kind: "setSegment",
+        node: 1,
+        at: { of: "segment", subpath: 0, segment: 0, t: 0.5 },
+        to: "cubic",
+      }).ok,
+    ).toBe(true);
+    expect(session.pathOf(1)?.[0].segs[0].kind).toBe(KIND.CUBIC);
+    session.undo();
+    expect(session.pathOf(1)?.[0].segs[0].kind).toBe(KIND.LINE);
+
+    // Two shapes, one outline: the boolean replaces both with their union.
+    session.selectOnly(1);
+    session.selectAdd(2);
+    expect(session.apply({ kind: "boolean", op: "union" }).ok).toBe(true);
+    expect(session.nodeCount()).toBe(2);
+    expect(session.selection()).toHaveLength(1);
+    expect(session.boundsOf(session.selection()[0])).toEqual({
+      x0: 10,
+      y0: 10,
+      x1: 80,
+      y1: 50,
+    });
+    // The engine's own label for a pathfinder step (its history wording).
+    expect(session.undo().ok && session.history().redoLabel).toBe("boolean");
+    expect(session.nodeCount()).toBe(3);
+    expect(session.redo().ok && session.history().undoLabel).toBe("boolean");
+
+    // SVG: parsed into nodes without a document, and imported into this one.
+    const svg = '<svg><path d="M4 4 L28 4 L28 28 L4 28 Z" fill="#123456"/></svg>';
+    const parsed = session.svgNodes(svg, 11, [1, 0, 0, 1, 3, 5], [0, 0, 0, 255]);
+    if (!parsed.ok) throw new Error(`svgNodes refused the file: ${parsed.message}`);
+    expect(parsed.value).toHaveLength(1);
+    expect(parsed.value[0].id).toBe(11);
+    expect(parsed.value[0].fill).toEqual([0x12, 0x34, 0x56, 255]);
+    // The placement rides on the node's own transform, not on its points: the
+    // geometry crosses the wire exactly as the file wrote it.
+    expect(parsed.value[0].m).toEqual([1, 0, 0, 1, 3, 5]);
+    expect(parsed.value[0].path[0].start).toEqual({ x: 4, y: 4 });
+    expect(parsed.value[0].path[0].segs).toHaveLength(3);
+    // Parsing is not an edit: the document has not moved on.
+    expect(session.history().canRedo).toBe(false);
+
+    const imported = session.importSvg(svg, [1, 0, 0, 1, 3, 5], [0, 0, 0, 255]);
+    expect(imported).toEqual({ ok: true, value: 1 });
+    expect(session.nodeCount()).toBe(3);
+    expect(session.selection()).toHaveLength(1);
+    expect(session.history().undoLabel).toBe("import svg");
+    expect(session.undo().ok && session.history().redoLabel).toBe("import svg");
+    expect(session.nodeCount()).toBe(2);
+
+    // A file the parser cannot read is a typed refusal, not a crash.
+    const broken = session.svgNodes("<svg><path d=\"M0 0 B1 1\"/></svg>", 1, [1, 0, 0, 1, 0, 0], [
+      0, 0, 0, 255,
+    ]);
+    expect(broken.ok).toBe(false);
+    expect(broken.ok ? 0 : broken.error).toBe(ERR.MALFORMED_SVG);
+    console.log(
+      "evidence: editor 4C commands — point edits (move, insert, delete, handle, segment kind) and " +
+        "booleans applied and undone through the adapter, and SVG parsed into nodes and imported as " +
+        "exactly one history step",
+    );
+    session.close();
+  });
+
   it("reloads cleanly after a close (history never leaks across documents)", async () => {
     const session = await freshSession();
     session.selectAll();

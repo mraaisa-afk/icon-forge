@@ -16,7 +16,8 @@
 use core::cell::RefCell;
 
 use isg_core::editor::{
-    AlignEdge, AlignFrame, ArrangeTo, Command, CommandError, Editor, NodeId, Point, SnapOptions,
+    svg, Affine, AlignEdge, AlignFrame, ArrangeTo, BooleanOp, Command, CommandError, Editor,
+    Handle, HandleRef, Node, NodeId, Point, SegKind, SegmentRef, SnapOptions, VertexRef,
     DEFAULT_PICK_TOLERANCE,
 };
 
@@ -89,6 +90,8 @@ pub const ERR_TRANSPARENT: u32 = 8;
 pub const ERR_NO_OP: u32 = 9;
 /// A referenced node no longer exists.
 pub const ERR_MISSING_NODE: u32 = 10;
+/// Imported SVG text that could not be read (`4C`).
+pub const ERR_MALFORMED_SVG: u32 = 11;
 
 /// Maps an engine failure onto its wire code.
 #[must_use]
@@ -97,9 +100,10 @@ pub const fn error_code(err: CommandError) -> u32 {
         CommandError::NoDocument => ERR_NO_DOCUMENT,
         CommandError::EmptySelection => ERR_NO_SELECTION,
         CommandError::MissingNode(_) => ERR_MISSING_NODE,
-        CommandError::DegenerateTransform => ERR_DEGENERATE,
+        CommandError::DegenerateTransform | CommandError::DegeneratePath => ERR_DEGENERATE,
         CommandError::Transparent => ERR_TRANSPARENT,
         CommandError::IndexOutOfRange => ERR_BAD_ARGUMENT,
+        CommandError::MalformedSvg => ERR_MALFORMED_SVG,
         CommandError::BadHistory => ERR_NO_HISTORY,
         CommandError::ZeroDelta | CommandError::NoOp => ERR_NO_OP,
     }
@@ -163,10 +167,28 @@ pub mod feature {
     pub const SNAP: u32 = 37;
     /// Installs (`a = 0`) or drops (`a = 1`) a live transform preview.
     pub const PREVIEW: u32 = 38;
+
+    /// Parses an SVG and reports its shapes as node records, without touching
+    /// the document (`4C`). This is how an icon becomes geometry: the host keeps
+    /// no parser of its own, and a file can be read before any document exists.
+    /// Input: a spec at `a` (see [`SVG_SPEC_WORDS`]). Output: node records,
+    /// written exactly as `NODE_SYNC` writes them.
+    pub const SVG_NODES: u32 = 39;
+
+    /// Imports an SVG into the document, one node per `<path>` (`4C`).
+    /// Input: the same spec at `a`. Requires a document; returns the number of
+    /// nodes added and makes them the selection.
+    pub const IMPORT_SVG: u32 = 40;
 }
 
 /// The highest feature number this ABI level defines.
-pub const MAX_FEATURE: u32 = feature::PREVIEW;
+pub const MAX_FEATURE: u32 = feature::IMPORT_SVG;
+
+/// Words in the spec both SVG features read: the first node id (used by
+/// `SVG_NODES`, ignored by `IMPORT_SVG`), the placement matrix, the default
+/// fill, the text's byte length, and then the text itself, packed
+/// little-endian into as many words as it needs.
+pub const SVG_SPEC_WORDS: usize = 9;
 
 // Command spec opcodes (see [`feature::APPLY_SPEC`]).
 /// `Translate`: `dx`, `dy`.
@@ -199,6 +221,20 @@ pub const OP_ARRANGE: u32 = 12;
 pub const OP_ALIGN: u32 = 13;
 /// Non-uniform scale about a pivot: `sx, sy, px, py` (`4B`).
 pub const OP_SCALE_XY: u32 = 14;
+/// Move one vertex: `id, subpath, vertex, x, y` (`4C`).
+pub const OP_MOVE_POINT: u32 = 15;
+/// Move one control handle: `id, subpath, segment, handle (0 = c1, 1 = c2),
+/// x, y` (`4C`).
+pub const OP_MOVE_HANDLE: u32 = 16;
+/// Insert a vertex on a segment at `t`: `id, subpath, segment, t` (`4C`).
+pub const OP_INSERT_POINT: u32 = 17;
+/// Delete a vertex, joining its neighbours: `id, subpath, vertex` (`4C`).
+pub const OP_DELETE_POINT: u32 = 18;
+/// Convert a segment: `id, subpath, segment, kind` (`0` = line, `1` = cubic)
+/// (`4C`).
+pub const OP_SET_SEGMENT: u32 = 19;
+/// Combine the selection: `op` (see [`BooleanOp`]) (`4C`).
+pub const OP_BOOLEAN: u32 = 20;
 
 /// Packs an RGBA fill into the `0xRRGGBBAA` word the ABI uses.
 #[must_use]
@@ -238,6 +274,50 @@ pub fn encode_command(command: &Command) -> Vec<u32> {
         Command::Align { frame, edge } => vec![OP_ALIGN, frame.raw(), edge.raw()],
         Command::Group => vec![OP_GROUP],
         Command::Ungroup => vec![OP_UNGROUP],
+        Command::MovePoint { id, at, to } => vec![
+            OP_MOVE_POINT,
+            id.get(),
+            at.subpath as u32,
+            at.vertex as u32,
+            b(to.0),
+            b(to.1),
+        ],
+        Command::MoveHandle { id, at, to } => vec![
+            OP_MOVE_HANDLE,
+            id.get(),
+            at.subpath as u32,
+            at.segment as u32,
+            match at.handle {
+                Handle::C1 => 0,
+                Handle::C2 => 1,
+            },
+            b(to.0),
+            b(to.1),
+        ],
+        Command::InsertPoint { id, at, t } => vec![
+            OP_INSERT_POINT,
+            id.get(),
+            at.subpath as u32,
+            at.segment as u32,
+            b(*t),
+        ],
+        Command::DeletePoint { id, at } => vec![
+            OP_DELETE_POINT,
+            id.get(),
+            at.subpath as u32,
+            at.vertex as u32,
+        ],
+        Command::SetSegment { id, at, to } => vec![
+            OP_SET_SEGMENT,
+            id.get(),
+            at.subpath as u32,
+            at.segment as u32,
+            match to {
+                SegKind::Line => 0,
+                SegKind::Cubic => 1,
+            },
+        ],
+        Command::Boolean { op } => vec![OP_BOOLEAN, op.raw()],
     }
 }
 
@@ -250,6 +330,11 @@ pub fn decode_command(words: &[u32]) -> Result<Command, u32> {
     let op = *words.first().ok_or(ERR_BAD_ARGUMENT)?;
     let f = |i: usize| words.get(i).map(|w| f32::from_bits(*w));
     let float = |i: usize| f(i).ok_or(ERR_BAD_ARGUMENT);
+    // Subpath/vertex/segment addresses cross as plain word indices. They are
+    // `usize` in the engine, and an address that does not exist is refused by
+    // the engine itself rather than here.
+    let index =
+        |i: usize| -> Result<usize, u32> { Ok(*words.get(i).ok_or(ERR_BAD_ARGUMENT)? as usize) };
     let flag = |i: usize| -> Result<bool, u32> { Ok(*words.get(i).ok_or(ERR_BAD_ARGUMENT)? != 0) };
     match op {
         OP_TRANSLATE => Ok(Command::Translate {
@@ -292,6 +377,46 @@ pub fn decode_command(words: &[u32]) -> Result<Command, u32> {
         }),
         OP_GROUP => Ok(Command::Group),
         OP_UNGROUP => Ok(Command::Ungroup),
+        OP_MOVE_POINT => Ok(Command::MovePoint {
+            id: NodeId::new(index(1)? as u32),
+            at: VertexRef::new(index(2)?, index(3)?),
+            to: (float(4)?, float(5)?),
+        }),
+        OP_MOVE_HANDLE => Ok(Command::MoveHandle {
+            id: NodeId::new(index(1)? as u32),
+            at: HandleRef::new(
+                index(2)?,
+                index(3)?,
+                match *words.get(4).ok_or(ERR_BAD_ARGUMENT)? {
+                    0 => Handle::C1,
+                    1 => Handle::C2,
+                    _ => return Err(ERR_BAD_ARGUMENT),
+                },
+            ),
+            to: (float(5)?, float(6)?),
+        }),
+        OP_INSERT_POINT => Ok(Command::InsertPoint {
+            id: NodeId::new(index(1)? as u32),
+            at: SegmentRef::new(index(2)?, index(3)?),
+            t: float(4)?,
+        }),
+        OP_DELETE_POINT => Ok(Command::DeletePoint {
+            id: NodeId::new(index(1)? as u32),
+            at: VertexRef::new(index(2)?, index(3)?),
+        }),
+        OP_SET_SEGMENT => Ok(Command::SetSegment {
+            id: NodeId::new(index(1)? as u32),
+            at: SegmentRef::new(index(2)?, index(3)?),
+            to: match *words.get(4).ok_or(ERR_BAD_ARGUMENT)? {
+                0 => SegKind::Line,
+                1 => SegKind::Cubic,
+                _ => return Err(ERR_BAD_ARGUMENT),
+            },
+        }),
+        OP_BOOLEAN => Ok(Command::Boolean {
+            op: BooleanOp::from_raw(*words.get(1).ok_or(ERR_BAD_ARGUMENT)?)
+                .ok_or(ERR_BAD_ARGUMENT)?,
+        }),
         _ => Err(ERR_BAD_ARGUMENT),
     }
 }
@@ -376,6 +501,7 @@ impl Abi {
         let deep_match = match feature {
             feature::VERSION => Some(ABI_VERSION),
             feature::DOC_LOAD => Some(self.load(a, input)),
+            feature::SVG_NODES => Some(self.svg_nodes(a, input, out)),
             feature::CLOSE => {
                 self.editor.close();
                 self.bump();
@@ -424,6 +550,7 @@ impl Abi {
                     feature::GET_TOLERANCE => self.tolerance.to_bits(),
                     feature::SET_TOLERANCE => self.set_tolerance(a),
                     feature::APPLY_SPEC => self.apply_spec(a, input),
+                    feature::IMPORT_SVG => self.import_svg(a, input),
                     feature::PREVIEW => self.preview(a, input),
                     feature::SNAP => self.snap(input, out),
                     feature::UNDO => self.undo(),
@@ -730,6 +857,125 @@ impl Abi {
             },
             Err(code) => {
                 self.error = code;
+                0
+            }
+        }
+    }
+
+    /// Reads the spec both SVG features take: where it is, what to place it
+    /// with, and the text itself.
+    ///
+    /// Returns the first node id, the placement, the default fill and the text.
+    fn svg_spec(&mut self, at: u32, input: &[u32]) -> Result<(u32, Affine, [u8; 4], String), ()> {
+        let base = at as usize;
+        let Some(header) = input.get(base..base + SVG_SPEC_WORDS) else {
+            self.error = ERR_BAD_ARGUMENT;
+            return Err(());
+        };
+        let first_id = header[0];
+        let mut m = [0.0f32; 6];
+        for (i, slot) in m.iter_mut().enumerate() {
+            *slot = f32::from_bits(header[1 + i]);
+        }
+        let fill = unpack_rgba(header[7]);
+        let bytes = header[8] as usize;
+        let words = bytes.div_ceil(4);
+        let Some(text_words) = input.get(base + SVG_SPEC_WORDS..base + SVG_SPEC_WORDS + words)
+        else {
+            self.error = ERR_BAD_ARGUMENT;
+            return Err(());
+        };
+        // The text is UTF-8 that the host packed four bytes to a word; only the
+        // bytes it declared are read, so the padding is never part of the text.
+        let mut raw = Vec::with_capacity(words * 4);
+        for word in text_words {
+            raw.extend_from_slice(&word.to_le_bytes());
+        }
+        raw.truncate(bytes);
+        match core::str::from_utf8(&raw) {
+            // Owned: the spec is decoded from a word table, so the text has to
+            // outlive the borrow of it.
+            Ok(text) => Ok((first_id, Affine::new(m), fill, text.to_owned())),
+            Err(_) => {
+                self.error = ERR_BAD_ARGUMENT;
+                Err(())
+            }
+        }
+    }
+
+    /// Parses an SVG into node records. No document is needed, and none is
+    /// touched: this is the read half of the import.
+    fn svg_nodes(&mut self, at: u32, input: &[u32], out: &mut [u32]) -> u32 {
+        let Ok((first_id, placement, fill, text)) = self.svg_spec(at, input) else {
+            return 0;
+        };
+        if !placement.is_finite() || placement.invert().is_none() {
+            self.error = ERR_DEGENERATE;
+            return 0;
+        }
+        let parsed = match svg::parse(&text) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                self.error = ERR_MALFORMED_SVG;
+                return 0;
+            }
+        };
+        let mut cursor = 0;
+        let mut written = 0;
+        for (offset, shape) in parsed.shapes.iter().enumerate() {
+            let transform = shape.transform.then(placement);
+            if !transform.is_finite() || transform.invert().is_none() {
+                self.error = ERR_DEGENERATE;
+                return 0;
+            }
+            let mut node = Node::new(
+                NodeId::new(first_id.saturating_add(offset as u32)),
+                shape.path.clone(),
+                shape.fill.unwrap_or(fill),
+            );
+            node.transform = transform;
+            match crate::doc_blob::write_node_record(&mut out[cursor..], &node) {
+                Some(words) => {
+                    cursor += words;
+                    written += 1;
+                }
+                None => {
+                    self.error = ERR_CAPACITY;
+                    break;
+                }
+            }
+        }
+        self.terminate(out, cursor);
+        written
+    }
+
+    /// Imports an SVG as one node per `<path>`, as one history step.
+    fn import_svg(&mut self, at: u32, input: &[u32]) -> u32 {
+        let Ok((_, placement, fill, text)) = self.svg_spec(at, input) else {
+            return 0;
+        };
+        let current = self.editor.doc().map_or(0, |doc| doc.node_count()) as u32;
+        // The node cap is a host-side promise about the canvas, so it is checked
+        // here and *before* anything is applied. The text is parsed once; the
+        // engine then takes the shapes rather than re-reading the file.
+        let parsed = match svg::parse(&text) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                self.error = ERR_MALFORMED_SVG;
+                return 0;
+            }
+        };
+        if current + parsed.shapes.len() as u32 > MAX_NODES {
+            self.error = ERR_CAPACITY;
+            return 0;
+        }
+        match self.editor.add_shapes(&parsed.shapes, placement, fill) {
+            Ok(added) => {
+                self.bump();
+                added.len() as u32
+            }
+            Err(err) => {
+                self.error = error_code(err);
                 0
             }
         }
