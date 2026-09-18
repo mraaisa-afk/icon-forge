@@ -8,6 +8,8 @@
 
 use super::affine::Affine;
 use super::doc::{GroupId, NodeId};
+use super::geom::Subpath;
+use super::points::{HandleRef, SegKind, SegmentRef, VertexRef};
 
 /// Why a command could not be applied. A rejected command must leave the
 /// document **and** the history untouched (the editor guarantees this by
@@ -24,8 +26,12 @@ pub enum CommandError {
     DegenerateTransform,
     /// The colour has no visible contribution (`alpha == 0`).
     Transparent,
-    /// The target index is outside the document.
+    /// The target index is outside the document, or a path address points at a
+    /// vertex, segment or handle that does not exist.
     IndexOutOfRange,
+    /// The edit would leave a path with nothing in it (a single point cannot be
+    /// a subpath), or the geometry has no meaning.
+    DegeneratePath,
     /// A history cursor operation was impossible (nothing to undo/redo, or the
     /// transaction depth is wrong).
     BadHistory,
@@ -49,6 +55,7 @@ impl CommandError {
             Self::DegenerateTransform => "degenerate_transform",
             Self::Transparent => "transparent",
             Self::IndexOutOfRange => "index_out_of_range",
+            Self::DegeneratePath => "degenerate_path",
             Self::BadHistory => "bad_history",
             Self::ZeroDelta => "zero_delta",
             Self::NoOp => "no_op",
@@ -96,6 +103,16 @@ pub enum NodeOp {
         /// Source z index.
         index: usize,
     },
+    /// Replace a node's local path (the node-editing tools, Phase 4C).
+    ///
+    /// The inverse carries the whole previous path, so a point edit undoes
+    /// exactly — byte for byte — no matter how many vertices it changed.
+    SetPath {
+        /// Which node.
+        id: NodeId,
+        /// The new local path.
+        to: Vec<Subpath>,
+    },
     /// Move a node into a group (or out of one, with `to: None`).
     ///
     /// This is the only op that touches group membership, and it carries the
@@ -107,6 +124,58 @@ pub enum NodeOp {
         /// The group it belongs to afterwards.
         to: Option<GroupId>,
     },
+}
+
+/// Which path boolean to compute from the selection (Phase 4C).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BooleanOp {
+    /// Everything either path covers.
+    Union,
+    /// The first path with the others cut out of it.
+    Subtract,
+    /// Only what every path covers.
+    Intersect,
+    /// What exactly one path covers (union minus intersection).
+    Exclude,
+}
+
+impl BooleanOp {
+    /// Every op, in wire order (the UI offers them all).
+    pub const ALL: [Self; 4] = [Self::Union, Self::Subtract, Self::Intersect, Self::Exclude];
+
+    /// Raw wire value.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Union => 0,
+            Self::Subtract => 1,
+            Self::Intersect => 2,
+            Self::Exclude => 3,
+        }
+    }
+
+    /// Decodes a wire value.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Union),
+            1 => Some(Self::Subtract),
+            2 => Some(Self::Intersect),
+            3 => Some(Self::Exclude),
+            _ => None,
+        }
+    }
+
+    /// Short label for the status line.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Union => "union",
+            Self::Subtract => "subtract",
+            Self::Intersect => "intersect",
+            Self::Exclude => "exclude",
+        }
+    }
 }
 
 /// Where a z-order command puts the selection.
@@ -311,6 +380,54 @@ pub enum Command {
         /// Which reference line.
         edge: AlignEdge,
     },
+    /// Move one vertex of a node's path (its handles come along).
+    MovePoint {
+        /// Which node (addressed directly: a point drag is a pointer gesture).
+        id: NodeId,
+        /// Which vertex.
+        at: VertexRef,
+        /// Where it goes, in the node's local coordinates.
+        to: (f32, f32),
+    },
+    /// Move one control handle of a cubic segment.
+    MoveHandle {
+        /// Which node.
+        id: NodeId,
+        /// Which handle.
+        at: HandleRef,
+        /// Where it goes, in the node's local coordinates.
+        to: (f32, f32),
+    },
+    /// Split a segment at parameter `t`, inserting a vertex there.
+    InsertPoint {
+        /// Which node.
+        id: NodeId,
+        /// Which segment.
+        at: SegmentRef,
+        /// Where along it (`0 < t < 1`).
+        t: f32,
+    },
+    /// Delete a vertex, joining its two neighbours.
+    DeletePoint {
+        /// Which node.
+        id: NodeId,
+        /// Which vertex.
+        at: VertexRef,
+    },
+    /// Convert a segment between a straight line and a cubic.
+    SetSegment {
+        /// Which node.
+        id: NodeId,
+        /// Which segment.
+        at: SegmentRef,
+        /// What it should become.
+        to: SegKind,
+    },
+    /// Combine the selection's paths into one (pathfinder).
+    Boolean {
+        /// Which operation.
+        op: BooleanOp,
+    },
     /// Group the selection: picking one member afterwards selects them all.
     Group,
     /// Dissolve the groups the selection belongs to.
@@ -337,6 +454,7 @@ impl Command {
                 | Self::SetVisible { .. }
                 | Self::Reorder { .. }
                 | Self::Duplicate { .. }
+                | Self::Boolean { .. }
                 | Self::Delete
         )
     }
@@ -351,6 +469,12 @@ impl Command {
             Self::Rotate { .. } => "rotate",
             Self::Arrange { .. } => "arrange",
             Self::Align { .. } => "align",
+            Self::MovePoint { .. } => "point",
+            Self::MoveHandle { .. } => "handle",
+            Self::InsertPoint { .. } => "insert point",
+            Self::DeletePoint { .. } => "delete point",
+            Self::SetSegment { .. } => "segment",
+            Self::Boolean { .. } => "boolean",
             Self::Group => "group",
             Self::Ungroup => "ungroup",
             Self::CenterOnCanvas => "centre",
