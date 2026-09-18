@@ -73,12 +73,20 @@ jobs:
       # *those bytes* under Node (already installed for the frontend step), so a
       # renamed export, a missing `memory`, or tables the host cannot see fail
       # here instead of in a user's webview.
-      - name: "Editor ABI: build the wasm artifact and run it under Node"
+      - name: "Editor ABI: build the wasm artifact, run it in Node and in the adapter tests"
         shell: bash
         run: |
           set -o pipefail
+          set -e
           cargo build --release --target wasm32-unknown-unknown -p isg-wasm
-          node crates/isg-wasm/tests/wasm_smoke.mjs 2>&1 | tee target/editor-evidence.txt
+          {
+            node crates/isg-wasm/tests/wasm_smoke.mjs
+            # The adapter tests are fatal about the artifact here (they skip it
+            # in the earlier frontend step, which runs before Rust exists).
+            ISG_REQUIRE_WASM=1 \
+              ISG_WASM_PATH=target/wasm32-unknown-unknown/release/isg_wasm.wasm \
+              npm test -- src/wasm src/state/editorStore.test.ts
+          } 2>&1 | tee target/editor-evidence.txt
 
       - name: Tests (release) — Phase 0 gate + Phase 1 exit-criteria tests
         # --nocapture: the exit-gate tests eprintln their measured

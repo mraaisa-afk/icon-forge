@@ -249,4 +249,7 @@ if (!failures.length) {
       `${walk} edits walked with exact undo and redo`,
   );
 }
-process.exit(failures.length ? 1 : 0);
+// `process.exit()` would drop buffered writes when stdout is a pipe (it is, in
+// CI, where this output is teed into the run's evidence): set the code and let
+// Node flush and exit on its own.
+process.exitCode = failures.length ? 1 : 0;
