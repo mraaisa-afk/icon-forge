@@ -16,6 +16,9 @@
 //!   batched sheet-wide through the content-addressed cache)
 //! * [`project`] — atomic `.isgproj` save/open (kill-safe by construction)
 //! * [`jobs`] — T0/T1/T2 job engine with cancellation and preemption
+//! * [`sheet`] — §3.5 sheet generation: grid layout, auto-leveling, metadata
+//!   derivation and the SVG/PDF/PNG/CSV exporters (the arithmetic half is
+//!   dependency-free on purpose — see the module docs)
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -27,6 +30,7 @@ pub mod jobs;
 pub mod pipeline;
 pub mod project;
 pub mod rss;
+pub mod sheet;
 
 pub use rss::{current_rss_bytes, RssWatcher};
 
