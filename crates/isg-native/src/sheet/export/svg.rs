@@ -62,12 +62,15 @@ pub fn write_sheet_svg(
         " width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
     ));
     out.push_str(&format!("<title>{}</title>", escape(&options.title)));
-    out.push_str(&format!(
-        "<desc>Icon Forge sheet · {} icons · {} px cells · {} placement</desc>",
+    // The description carries a typographic separator, so it goes through the
+    // same 7-bit escaping as a name: the document stays ASCII either way.
+    let desc = format!(
+        "Icon Forge sheet · {} icons · {} px cells · {} placement",
         plan.placements.len(),
         plan.spec.cell,
         placement_name(plan.spec.placement)
-    ));
+    );
+    out.push_str(&format!("<desc>{}</desc>", escape(&desc)));
     out.push_str(&format!(
         "<metadata>icon-forge sheet v1 cell=\"{}\" padding=\"{}\" gap=\"{}\" ink-ratio=\"{}\" \
          placement=\"{}\" icons=\"{}\" ink-size-cv=\"{:.4}\"</metadata>",
@@ -177,7 +180,23 @@ fn placement_name(placement: Placement) -> &'static str {
 }
 
 /// XML text escaping for titles and names.
+/// XML-escapes `text` for element content.
+///
+/// The result is 7-bit: every character outside ASCII becomes a numeric
+/// character reference. A sheet's title and its icons' names come from file
+/// names, which may be in any script, and a document that is pure ASCII cannot
+/// be mis-decoded by a reader that ignores the encoding declaration — which is
+/// the class of reader the "opens cleanly anywhere" criterion is about. Every
+/// XML parser resolves the references back to the original text.
 fn escape(text: &str) -> String {
+    escape_body(text, ' ')
+}
+
+/// The shared escaping: XML entities, control characters replaced by
+/// `control_replacement` (they are not legal XML 1.0 at all, and a sheet with
+/// one in a name must still export), everything outside ASCII as a numeric
+/// character reference.
+fn escape_body(text: &str, control_replacement: char) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -186,9 +205,11 @@ fn escape(text: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            // Control characters are not legal XML 1.0 at all; a sheet with one
-            // in a name must still export.
-            c if (c as u32) < 0x20 => out.push(' '),
+            c if (c as u32) < 0x20 => out.push(control_replacement),
+            c if !c.is_ascii() => {
+                let code = c as u32;
+                out.push_str(&format!("&#x{code:X};"));
+            }
             c => out.push(c),
         }
     }
@@ -208,15 +229,7 @@ fn escape_id(name: &str) -> String {
             continue;
         }
         last_dash = false;
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            c if (c as u32) < 0x20 => out.push('_'),
-            c => out.push(c),
-        }
+        out.push_str(&escape_body(&c.to_string(), '_'));
     }
     if out.is_empty() {
         "icon".to_string()
@@ -364,6 +377,38 @@ mod tests {
         let art = artwork_of(2, 20.0);
         let err = write_sheet_svg(&plan, &art, &SvgOptions::default()).unwrap_err();
         assert_eq!(err, ExportError::MissingArtwork { id: 3 });
+    }
+
+    #[test]
+    fn names_in_any_script_keep_the_document_seven_bit() {
+        // The wizard's names come from a file's stem, so they can be in any
+        // script — the document must still be pure ASCII, with the text intact
+        // once an XML reader resolves the references.
+        let plan = plan_of(2);
+        let art: Vec<Artwork> = (1..=2)
+            .map(|id| {
+                artwork_from_svg(
+                    id,
+                    format!("আইকন-{id}"),
+                    "<svg><path d=\"M0,0L4,0L4,4Z\"/></svg>",
+                )
+                .expect("artwork")
+            })
+            .collect();
+        let svg = write_sheet_svg(
+            &plan,
+            &art,
+            &SvgOptions {
+                title: "শিট (Sheet)".to_string(),
+                name_layers: true,
+                background: None,
+            },
+        )
+        .expect("writes");
+        assert!(svg.is_ascii(), "the sheet SVG must be 7-bit: {svg}");
+        // U+0986 is the first letter of the title.
+        assert!(svg.contains("&#x986;"), "{svg}");
+        engine_svg::parse(&svg).expect("character references do not break the document");
     }
 
     #[test]

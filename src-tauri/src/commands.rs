@@ -17,9 +17,9 @@ use isg_native::pipeline::{
     VectorizeError, WarningKind,
 };
 use isg_native::sheet::export::{
-    artwork_from_svg, derive_row, expand_pattern, grid_position, parse_csv, slugify, write_csv,
-    write_sheet_pdf, write_sheet_svg, Artwork, Column, CsvOptions, IconMeta, PatternValues,
-    PdfOptions, SheetRow, SvgOptions, CSV_COLUMNS,
+    artwork_file, artwork_from_svg, derive_row, expand_pattern, grid_position, parse_csv, slugify,
+    write_csv, write_sheet_pdf, write_sheet_svg, Artwork, Column, CsvOptions, IconMeta,
+    PatternValues, PdfOptions, SheetRow, SvgOptions, CSV_COLUMNS,
 };
 use isg_native::sheet::metrics::IconMetrics;
 use isg_native::sheet::{measure, IconInput, SheetPlan, SheetSpec};
@@ -940,7 +940,7 @@ pub fn sheet_preview(
 /// The cell spec the wizard sends. Every field has a default, so a partial
 /// request is a valid request — and every value is clamped by
 /// [`SheetSpec::from_wire`] rather than rejected, because these are sliders.
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SheetSpecDto {
     /// Cell side in pixels.
@@ -1417,7 +1417,7 @@ fn trace_artwork(
 
 /// Turns a build into the plan DTO the wizard renders.
 fn plan_dto(build: &SheetBuild) -> SheetPlanDto {
-    let placements = build
+    let placements: Vec<SheetPlacementDto> = build
         .plan
         .placements
         .iter()

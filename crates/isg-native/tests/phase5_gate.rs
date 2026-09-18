@@ -431,3 +431,155 @@ fn f3_exports_are_byte_deterministic() {
         Placement::ALL.len()
     );
 }
+
+/// A small sheet built without a corpus sheet: two icons whose artwork exercises
+/// the shapes the exporters must survive (an even-odd hole, a cubic, and a
+/// translucent fill written the way the pipeline writes one — as an 8-digit hex
+/// colour, since neither the emitter nor the engine's reader has CSS).
+fn synthetic_sheet() -> (SheetPlan, Vec<Artwork>) {
+    let documents = [
+        "<svg><path d=\"M2,2L30,2L30,30L2,30Z M10,10L22,10L22,22L10,22Z\" fill=\"#1a2b3c\"/></svg>",
+        "<svg><path d=\"M2,20C6,4 26,4 30,20Z\" fill=\"#c0392b80\"/></svg>",
+    ];
+    let mut icons = Vec::new();
+    let mut artwork = Vec::new();
+    for (index, document) in documents.iter().enumerate() {
+        let id = index as u32 + 1;
+        let mask = {
+            let mut mask = ForegroundMask::new(32, 32);
+            for y in 0..32 {
+                for x in 0..32 {
+                    mask.set(x, y, x > 2 && x < 30 && y > 2 && y < 30);
+                }
+            }
+            mask
+        };
+        let metrics = measure(&mask, Bbox::new(0, 0, 32, 32).expect("bbox")).expect("ink");
+        icons.push(IconInput { id, metrics });
+        artwork.push(artwork_from_svg(id, format!("icon-{id:03}"), document).expect("artwork"));
+    }
+    (SheetPlan::new(&icons, spec()), artwork)
+}
+
+/// **F4** — the "opens cleanly in Inkscape / Illustrator / Chrome" half of the
+/// exit criteria, expressed as the properties those viewers depend on: a
+/// standalone UTF-8 SVG that uses presentation attributes only (no CSS, no
+/// `<style>`, nothing external), a PDF a simple reader can parse with no filter,
+/// font or transparency machinery, and a PNG in the one byte layout every
+/// decoder supports.
+///
+/// No viewer is available in CI, so this does not replace opening the files by
+/// hand; it is what *can* be proven about them here, and it fails loudly if an
+/// exporter ever starts depending on a feature only some readers have.
+#[test]
+fn f4_the_exports_are_conservative_documents() {
+    let (plan, artwork) = synthetic_sheet();
+    let shapes: usize = artwork.iter().map(|a| a.shapes.len()).sum();
+    let (w, h) = plan.size();
+
+    // --- SVG ---------------------------------------------------------------
+    let svg = write_sheet_svg(&plan, &artwork, &SvgOptions::default()).expect("svg writes");
+    assert!(svg.is_ascii(), "the sheet SVG must be pure ASCII");
+    assert!(svg.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg "));
+    assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+    assert!(svg.contains(&format!("viewBox=\"0 0 {w} {h}\"")));
+    for forbidden in [
+        "<!DOCTYPE",
+        "<style",
+        " class=",
+        "href",
+        "<image",
+        "<use",
+        "<script",
+        "@font-face",
+        "url(",
+        "vector-effect",
+        "NaN",
+        "INF",
+    ] {
+        assert!(
+            !svg.contains(forbidden),
+            "the sheet SVG must not contain {forbidden}"
+        );
+    }
+    // Every element it contains is one every renderer knows.
+    for chunk in svg.split('<').skip(1) {
+        let name: String = chunk
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        assert!(
+            ["svg", "title", "desc", "metadata", "rect", "g", "path", "/svg", "/g", "/title"]
+                .contains(&name.as_str()),
+            "unexpected element <{name}"
+        );
+    }
+    assert_eq!(svg.matches("<path ").count(), shapes, "one path per shape");
+    // A translucent fill survives as a presentation attribute, not as CSS.
+    assert!(
+        svg.contains("fill=\"#c0392b\" fill-opacity=\"0.502\""),
+        "the translucent fill keeps its alpha: {svg}"
+    );
+
+    // --- PDF ---------------------------------------------------------------
+    let pdf = write_sheet_pdf(&plan, &artwork, &PdfOptions::default()).expect("pdf writes");
+    assert!(pdf.starts_with(b"%PDF-1.4"), "a version every reader ships");
+    assert!(
+        pdf.ends_with(b"%%EOF\n"),
+        "a complete file, not a truncated one"
+    );
+    let text = String::from_utf8(pdf.clone()).expect("pure ASCII, per the writer's own rule");
+    for forbidden in [
+        "/Filter", "/Encrypt", "/Font", "/Image", "/Annots", "/XObject",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "the sheet PDF must not need {forbidden}"
+        );
+    }
+    assert!(text.contains("\nxref\n"), "a classic xref table");
+    assert!(text.contains("\ntrailer\n"));
+    assert_eq!(
+        text.matches("f*\n").count(),
+        shapes,
+        "one even-odd fill per shape"
+    );
+    // Every token in every content stream is a number or an operator that any
+    // reader implements — nothing here needs a feature only some viewers have.
+    let allowed: &[&str] = &["q", "Q", "rg", "re", "f", "f*", "m", "l", "c", "h"];
+    let mut operators = 0usize;
+    for part in text.split("stream\n").skip(1) {
+        let body = part.split("endstream").next().unwrap_or_default();
+        for token in body.split_whitespace() {
+            assert!(
+                token.parse::<f32>().is_ok() || allowed.contains(&token),
+                "unexpected PDF token `{token}`"
+            );
+            if !token.parse::<f32>().is_ok() {
+                operators += 1;
+            }
+        }
+    }
+    assert!(operators > 0, "the page has no drawing operators");
+
+    // --- PNG ---------------------------------------------------------------
+    let raster = render_sheet_png(&plan, &artwork, &RasterOptions::default()).expect("png renders");
+    let png = isg_native::sheet::export::parse_png(&raster.png).expect("the PNG reader accepts it");
+    assert_eq!((png.bit_depth, png.color_type, png.interlace), (8, 6, 0));
+    assert_eq!((png.width, png.height), (w, h));
+    assert!(raster
+        .png
+        .starts_with(&isg_native::sheet::export::png::PNG_SIGNATURE));
+
+    eprintln!(
+        "evidence: phase5 F4 svg={} B ({} paths, presentation attributes only, no external refs) \
+         pdf={} B (PDF-1.4, {} fills, {operators} operators, no filters/xref-stream) png={} B \
+         (8-bit RGBA, no interlace, {} B of IDAT)",
+        svg.len(),
+        shapes,
+        pdf.len(),
+        shapes,
+        raster.png.len(),
+        png.idat_bytes
+    );
+}
