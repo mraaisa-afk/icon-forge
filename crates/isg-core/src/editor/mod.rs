@@ -41,6 +41,7 @@ pub mod doc;
 pub mod geom;
 pub mod points;
 pub mod snap;
+pub mod svg;
 
 pub use affine::Affine;
 pub use command::{AlignEdge, AlignFrame, ArrangeTo, BooleanOp, Command, CommandError, NodeOp};
@@ -587,6 +588,78 @@ impl Editor {
         self.normalize_selection();
         self.history.push(entry.clone());
         Ok(entry.forward.len())
+    }
+
+    // -- 4C: SVG import ------------------------------------------------------
+
+    /// Adds every `<path>` of an SVG to the document, one node each.
+    ///
+    /// The geometry keeps the SVG's own coordinates, mapped through `placement`;
+    /// a shape with no readable `fill` gets `fill`. Each shape becomes its own
+    /// node so it can be selected, recoloured and edited on its own, and the new
+    /// nodes end up selected — an import that leaves nothing selected looks like
+    /// it failed.
+    ///
+    /// The import is one history step whose inverse removes exactly the nodes it
+    /// added.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::MalformedSvg`] when the text cannot be read,
+    /// [`CommandError::NoOp`] when it draws nothing, and
+    /// [`CommandError::DegenerateTransform`] for a placement or a shape
+    /// transform that is not invertible.
+    pub fn import_svg(
+        &mut self,
+        text: &str,
+        placement: Affine,
+        fill: [u8; 4],
+    ) -> Result<Vec<NodeId>, CommandError> {
+        if !placement.is_finite() || placement.invert().is_none() {
+            return Err(CommandError::DegenerateTransform);
+        }
+        let parsed = svg::parse(text).map_err(|_| CommandError::MalformedSvg)?;
+        if parsed.shapes.is_empty() {
+            return Err(CommandError::NoOp);
+        }
+        let shapes = &parsed.shapes;
+
+        let doc = self.doc.as_ref().ok_or(CommandError::NoDocument)?;
+        let count = doc.node_count();
+        let mut forward = Vec::with_capacity(shapes.len());
+        let mut raw_inverse = Vec::with_capacity(shapes.len());
+        let mut added = Vec::with_capacity(shapes.len());
+        for (offset, shape) in shapes.iter().enumerate() {
+            let transform = shape.transform.then(placement);
+            if !transform.is_finite() || transform.invert().is_none() {
+                return Err(CommandError::DegenerateTransform);
+            }
+            let mut node = Node::new(
+                NodeId::new(doc.next_id() + offset as u32),
+                shape.path.clone(),
+                shape.fill.unwrap_or(fill),
+            );
+            node.transform = transform;
+            let index = count + offset;
+            added.push(node.id);
+            forward.push(NodeOp::Insert { index, node });
+            raw_inverse.push(NodeOp::Remove { index });
+        }
+        raw_inverse.reverse();
+        let entry = HistoryEntry {
+            label: "import svg",
+            forward,
+            inverse: raw_inverse,
+            selection_before: self.selection.clone(),
+            selection_after: added.clone(),
+        };
+        let doc = self.doc.as_mut().ok_or(CommandError::NoDocument)?;
+        apply_ops(doc, &entry.forward)?;
+        self.preview = None;
+        self.selection = entry.selection_after.clone();
+        self.normalize_selection();
+        self.history.push(entry);
+        Ok(added)
     }
 
     /// Undoes one step.
@@ -1699,6 +1772,139 @@ mod tests {
         eprintln!(
             "evidence: editor booleans — {pairs} rectangle pairs satisfy the area identities, and {samples} sample points match the union/subtract/intersect/exclude truth tables"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4C: SVG import through the editor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_import_adds_one_node_per_path_as_one_history_step() {
+        let mut ed = Editor::new();
+        ed.load(Doc::new(100.0, 100.0));
+        let svg = r##"<svg viewBox="0 0 24 24">
+            <path d="M0,0 L10,0 L10,10 Z" fill="#ff0000"/>
+            <g transform="translate(4,4)">
+              <path d="M0,0 L4,0 L4,4 Z"/>
+            </g>
+          </svg>"##;
+        let added = ed
+            .import_svg(svg, Affine::IDENTITY, [9, 9, 9, 255])
+            .unwrap();
+        assert_eq!(added.len(), 2);
+        assert_eq!(ed.doc().unwrap().node_count(), 2);
+        assert_eq!(ed.selection(), added.as_slice());
+        // The fills come from the file, with the caller's default for the shape
+        // that has none; the group's transform is baked into the node.
+        let first = ed.doc().unwrap().node(added[0]).unwrap();
+        assert_eq!(first.fill, [255, 0, 0, 255]);
+        assert_eq!(first.path[0].start, Point::new(0.0, 0.0));
+        let second = ed.doc().unwrap().node(added[1]).unwrap();
+        assert_eq!(second.fill, [9, 9, 9, 255]);
+        assert_eq!(second.transform.apply(0.0, 0.0), (4.0, 4.0));
+
+        // One step, and undoing it leaves the document exactly as it was.
+        assert_eq!(ed.history().entries().len(), 1);
+        assert_eq!(ed.history().entries()[0].label, "import svg");
+        assert_eq!(ed.undo().unwrap(), "import svg");
+        assert_eq!(ed.doc().unwrap().node_count(), 0);
+        assert!(ed.selection().is_empty());
+        assert_eq!(ed.redo().unwrap(), "import svg");
+        assert_eq!(ed.doc().unwrap().node_count(), 2);
+        assert_eq!(ed.selection(), added.as_slice());
+    }
+
+    #[test]
+    fn an_import_is_placed_by_the_caller_and_composes_with_the_file() {
+        let mut ed = Editor::new();
+        ed.load(Doc::new(100.0, 100.0));
+        let svg = r##"<svg><path d="M0,0 L2,0 L2,2 Z" transform="scale(2)"/></svg>"##;
+        // Placement is applied outside the file's own transforms: scale(2) then
+        // translate(10,20) puts the point (1,1) at (12,22).
+        let added = ed
+            .import_svg(svg, Affine::translate(10.0, 20.0), [0, 0, 0, 255])
+            .unwrap();
+        let node = ed.doc().unwrap().node(added[0]).unwrap();
+        assert_eq!(node.transform.apply(1.0, 1.0), (12.0, 22.0));
+        // The geometry itself is untouched: the transform carries the placement.
+        assert_eq!(node.path[0].segs[0].end(), Point::new(2.0, 0.0));
+    }
+
+    #[test]
+    fn an_import_that_draws_nothing_or_is_malformed_is_refused() {
+        let mut ed = Editor::new();
+        ed.load(Doc::new(100.0, 100.0));
+        // An unreadable path, a truncated file, a malformed transform.
+        for text in [
+            r##"<svg><path d="M0,0 B1,1"/></svg>"##,
+            r##"<svg><path d="M0,0 L1,1""##,
+            r##"<svg><path d="M0,0 L1,1" transform="wobble(2)"/></svg>"##,
+        ] {
+            assert_eq!(
+                ed.import_svg(text, Affine::IDENTITY, [0, 0, 0, 255]),
+                Err(CommandError::MalformedSvg),
+                "{text}"
+            );
+        }
+        // A file that parses but draws nothing is a no-op, not an error — an
+        // HTML page and an SVG full of shapes the importer does not read (a
+        // `<rect>`, say) both land here.
+        for text in [
+            "<svg><rect x='0' y='0'/></svg>",
+            "<html><body>hello</body></html>",
+        ] {
+            assert_eq!(
+                ed.import_svg(text, Affine::IDENTITY, [0; 4]),
+                Err(CommandError::NoOp),
+                "{text}"
+            );
+        }
+        // A placement that cannot be inverted is refused.
+        assert_eq!(
+            ed.import_svg(
+                r##"<svg><path d="M0,0 L1,1"/></svg>"##,
+                Affine::scale(0.0, 1.0),
+                [0, 0, 0, 255]
+            ),
+            Err(CommandError::DegenerateTransform)
+        );
+        assert_eq!(ed.doc().unwrap().node_count(), 0);
+        assert_eq!(ed.history().entries().len(), 0);
+    }
+
+    /// Importing a real traced icon (the vectorizer's own output shape: absolute
+    /// `M`/`L`/`C`/`Z`, one path per colour layer) yields editable nodes whose
+    /// geometry matches the file, and a round trip through undo restores the
+    /// empty document bit for bit.
+    #[test]
+    fn importing_a_traced_icon_round_trips_through_undo() {
+        let svg = r##"<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4,4 L28,4 L28,28 L4,28 Z" fill="#123456" fill-rule="evenodd"/>
+            <path d="M8,8 C12,4 20,4 24,8 L24,24 L8,24 Z" fill="#abcdef"/>
+          </svg>"##;
+        let mut ed = Editor::new();
+        ed.load(Doc::new(32.0, 32.0));
+        let before = ed.clone();
+        let added = ed
+            .import_svg(svg, Affine::IDENTITY, [0, 0, 0, 255])
+            .unwrap();
+        assert_eq!(added.len(), 2);
+        // 3 lines for the square (the closing edge is implicit) and a cubic
+        // plus 2 lines for the blob.
+        assert_eq!(ed.doc().unwrap().segment_count(), 6);
+        let outer = ed.doc().unwrap().node(added[0]).unwrap();
+        assert_eq!(outer.fill, [0x12, 0x34, 0x56, 255]);
+        let (lo, hi) = outer.bounds().unwrap();
+        assert_eq!((lo.x, lo.y, hi.x, hi.y), (4.0, 4.0, 28.0, 28.0));
+        let inner = ed.doc().unwrap().node(added[1]).unwrap();
+        assert_eq!(inner.fill, [0xab, 0xcd, 0xef, 255]);
+        assert!(matches!(inner.path[0].segs[0], Seg::Cubic { .. }));
+        assert!(matches!(inner.path[0].segs[1], Seg::Line(_)));
+        ed.undo().unwrap();
+        assert_eq!(view(&ed), view(&before));
+        assert_eq!(ed.doc().unwrap().segment_count(), 0);
+        ed.redo().unwrap();
+        assert_eq!(ed.doc().unwrap().node_count(), 2);
     }
 
     #[test]

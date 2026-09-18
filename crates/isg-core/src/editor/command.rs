@@ -32,6 +32,9 @@ pub enum CommandError {
     /// The edit would leave a path with nothing in it (a single point cannot be
     /// a subpath), or the geometry has no meaning.
     DegeneratePath,
+    /// An imported SVG could not be read: a path command outside the grammar, a
+    /// malformed number or transform, or a truncated file.
+    MalformedSvg,
     /// A history cursor operation was impossible (nothing to undo/redo, or the
     /// transaction depth is wrong).
     BadHistory,
@@ -56,6 +59,7 @@ impl CommandError {
             Self::Transparent => "transparent",
             Self::IndexOutOfRange => "index_out_of_range",
             Self::DegeneratePath => "degenerate_path",
+            Self::MalformedSvg => "malformed_svg",
             Self::BadHistory => "bad_history",
             Self::ZeroDelta => "zero_delta",
             Self::NoOp => "no_op",
