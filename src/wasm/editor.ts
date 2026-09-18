@@ -24,16 +24,22 @@
 import {
   ABI_VERSION,
   decodePath,
+  decodeSnapResult,
   decodeText,
   encodeCommand,
   encodeDoc,
+  encodeSnapRequest,
   ERR,
   ERR_TEXT,
   FEATURE,
   f2w,
   KIND,
+  NODE_GROUP_SLOT,
+  NODE_PATH_SLOT,
   NODE_RECORD_HEADER,
+  PREVIEW,
   SEGMENT_WORDS,
+  SNAP_ANSWER_WORDS,
   SUBPATH_HEADER,
   unpackRgba,
   w2f,
@@ -41,8 +47,19 @@ import {
   type EditorCommand,
   type NodeSpec,
   type Segment,
+  type SnapResult,
   type Subpath,
 } from "./abi";
+
+/** Which target families a snap request may use, and how close counts. */
+export interface SnapQuery {
+  /** Distance in document units within which a target attracts. */
+  tolerance: number;
+  /** Mask of `SNAP.*` flags; `0` means snapping is off and the delta passes through. */
+  flags: number;
+  /** Grid pitch in document units (ignored unless `SNAP.GRID` is set). */
+  gridStep: number;
+}
 
 /**
  * A live view over module memory.
@@ -100,6 +117,8 @@ export interface NodeCursor {
   /** Packed `0xRRGGBBAA`. */
   fill: number;
   visible: boolean;
+  /** Group id, `0` when the node is not in a group. */
+  group: number;
   /** Runs the visitor for each subpath of this node. */
   eachSubpath: (visit: (subpath: SubpathCursor) => void) => number;
 }
@@ -110,6 +129,7 @@ const NODE_CURSOR: NodeCursor = {
   m: new Float32Array(6),
   fill: 0,
   visible: true,
+  group: 0,
   pathAt: 0,
   pathWords: 0,
   words: new Uint32Array(0),
@@ -228,6 +248,9 @@ export class EditorSession {
    */
   #nodes: { count: number; outBase: number; buffer: ArrayBufferLike } | null = null;
 
+  /** Mirror of the engine's live preview, so the UI can ask without a call. */
+  #previewed: EditorCommand | null = null;
+
   private constructor(exports: EditorExports) {
     this.exports = exports;
     this.abiVersion = exports.editor_abi_version();
@@ -345,6 +368,7 @@ export class EditorSession {
   loadDocument(width: number, height: number, nodes: NodeSpec[]): EditorResult<number> {
     this.#put(encodeDoc(width, height, nodes));
     const count = this.call(FEATURE.DOC_LOAD);
+    this.#previewed = null;
     if (count === 0 && this.#error !== ERR.NONE) return this.#fail();
     return { ok: true, value: count };
   }
@@ -382,7 +406,14 @@ export class EditorSession {
         });
         path.push({ start: { x: sub.startX, y: sub.startY }, closed: sub.closed, segs });
       });
-      nodes.push({ id: node.id, m: Array.from(node.m), fill: unpackRgba(node.fill), visible: node.visible, path });
+      nodes.push({
+        id: node.id,
+        m: Array.from(node.m),
+        fill: unpackRgba(node.fill),
+        visible: node.visible,
+        group: node.group,
+        path,
+      });
     });
     return nodes;
   }
@@ -415,8 +446,9 @@ export class EditorSession {
       node.m = floats.subarray(at + 1, at + 7);
       node.fill = mem[at + 7];
       node.visible = mem[at + 8] !== 0;
+      node.group = mem[at + NODE_GROUP_SLOT];
       node.pathAt = at + NODE_RECORD_HEADER;
-      node.pathWords = mem[at + 9];
+      node.pathWords = mem[at + NODE_PATH_SLOT];
       node.words = mem;
       node.floats = floats;
       visit(node);
@@ -443,6 +475,7 @@ export class EditorSession {
   /** Closes the document and forgets the history. */
   close(): void {
     this.call(FEATURE.CLOSE);
+    this.#previewed = null;
   }
 
   // -- selection -----------------------------------------------------------
@@ -512,13 +545,65 @@ export class EditorSession {
   apply(command: EditorCommand): EditorResult<number> {
     this.#put(encodeCommand(command));
     const ops = this.call(FEATURE.APPLY_SPEC);
+    // Applying anything drops a live preview (the engine does that too).
+    this.#previewed = null;
     if (ops === 0) return this.#fail();
     return { ok: true, value: ops };
+  }
+
+  // -- snapping and previews (4B) -------------------------------------------
+
+  /**
+   * Asks where a proposed move of the selection would land.
+   *
+   * The delta asked about is the *proposed* one and the engine answers from the
+   * stored geometry, so the caller can preview or commit exactly the delta it
+   * gets back — the two can never drift apart.
+   */
+  snapMove(dx: number, dy: number, query: SnapQuery): EditorResult<SnapResult> {
+    this.#put(encodeSnapRequest(dx, dy, query.tolerance, query.flags, query.gridStep));
+    this.call(FEATURE.SNAP);
+    if (this.#error !== ERR.NONE) return this.#fail();
+    return { ok: true, value: decodeSnapResult(this.#out(SNAP_ANSWER_WORDS)) };
+  }
+
+  /**
+   * Installs a live preview of a command.
+   *
+   * A preview is *not* an edit: it records no history, moves what `NODE_SYNC`,
+   * `NODE_BOUNDS` and `SELECTION_BOUNDS` report, and is dropped by the next
+   * `apply`, `undo` or `redo`. Committing the same command afterwards lands on
+   * exactly the geometry the preview showed.
+   */
+  preview(command: EditorCommand): EditorResult<number> {
+    this.#put(encodeCommand(command));
+    const ops = this.call(FEATURE.PREVIEW, PREVIEW.SET);
+    if (ops === 0) return this.#fail();
+    this.#previewed = command;
+    return { ok: true, value: ops };
+  }
+
+  /** Drops the live preview (a cancelled gesture). */
+  clearPreview(): void {
+    this.call(FEATURE.PREVIEW, PREVIEW.CLEAR);
+    this.#previewed = null;
+  }
+
+  /**
+   * The command currently being previewed, or `null`.
+   *
+   * The module does not expose this, and it does not need to: the engine drops
+   * the preview the moment the document changes, and every path here that
+   * changes it drops the mirror too, so the two cannot disagree.
+   */
+  get previewing(): EditorCommand | null {
+    return this.#previewed;
   }
 
   /** Undoes one step; the value is the undone command's label. */
   undo(): EditorResult<string> {
     const bytes = this.call(FEATURE.UNDO);
+    this.#previewed = null;
     if (bytes === 0) return this.#fail();
     return { ok: true, value: this.#label(bytes) };
   }
@@ -526,6 +611,7 @@ export class EditorSession {
   /** Redoes one step; the value is the redone command's label. */
   redo(): EditorResult<string> {
     const bytes = this.call(FEATURE.REDO);
+    this.#previewed = null;
     if (bytes === 0) return this.#fail();
     return { ok: true, value: this.#label(bytes) };
   }

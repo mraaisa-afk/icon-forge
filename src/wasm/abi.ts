@@ -12,7 +12,7 @@
  */
 
 /** ABI level of the exported entry points; must match `abi::ABI_VERSION`. */
-export const ABI_VERSION = 1;
+export const ABI_VERSION = 2;
 
 /** Words in the input table. */
 export const IN_WORDS = 1 << 20;
@@ -27,7 +27,13 @@ export const MAX_NODES = 4096;
 export const DOC_HEADER = 4;
 
 /** Words in a node record header; its path blob follows. */
-export const NODE_RECORD_HEADER = 10;
+export const NODE_RECORD_HEADER = 11;
+
+/** Slot (within the node record header) holding the node's group id, 0 = none. */
+export const NODE_GROUP_SLOT = 9;
+
+/** Slot (within the node record header) holding the path blob's word count. */
+export const NODE_PATH_SLOT = 10;
 
 /** Words in a subpath header: start x, start y, closed, segment count. */
 export const SUBPATH_HEADER = 4;
@@ -74,6 +80,8 @@ export const FEATURE = {
   SEGMENT_COUNT: 34,
   NODE_AT: 35,
   CLOSE: 36,
+  SNAP: 37,
+  PREVIEW: 38,
 } as const;
 
 /** Command spec opcodes — see `abi::OP_*`. */
@@ -87,7 +95,75 @@ export const OP = {
   REORDER: 7,
   DUPLICATE: 8,
   DELETE: 9,
+  GROUP: 10,
+  UNGROUP: 11,
+  ARRANGE: 12,
+  ALIGN: 13,
+  SCALE_XY: 14,
 } as const;
+
+/** `SNAP` input flags: which target families snapping may use. */
+export const SNAP = {
+  CANVAS: 1 << 0,
+  NODES: 1 << 1,
+  GRID: 1 << 2,
+} as const;
+
+/** Every `SNAP` flag the ABI defines (a bit outside this mask is refused). */
+export const SNAP_FLAGS = SNAP.CANVAS | SNAP.NODES | SNAP.GRID;
+
+/** `PREVIEW` argument `a`: install a preview (`b` = spec offset) or drop it. */
+export const PREVIEW = { SET: 0, CLEAR: 1 } as const;
+
+/** Words per snap guide record: axis, kind, position, from, to. */
+export const GUIDE_WORDS = 5;
+
+/** Most guides one `SNAP` answer carries (mirrors `editor::snap::MAX_GUIDES`). */
+export const MAX_SNAP_GUIDES = 8;
+
+/** Which line a guide describes; raw values are wire values (see `GuideKind`). */
+export const GUIDE_KIND = {
+  CANVAS_EDGE: 0,
+  CANVAS_CENTER: 1,
+  NODE_EDGE: 2,
+  NODE_CENTER: 3,
+  GRID: 4,
+} as const;
+
+/** Where an arranged node ends up. */
+export type ArrangeTo = "front" | "back";
+
+/** What an alignment lines the selection up against. */
+export type AlignFrame = "selection" | "canvas";
+
+/** Which reference line of the frame an alignment uses. */
+export type AlignEdge = "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom";
+
+/** Wire values for `ArrangeTo` (see `isg_core::editor::ArrangeTo::raw`). */
+export const ARRANGE_RAW: Record<ArrangeTo, number> = { front: 0, back: 1 };
+
+/** Wire values for `AlignFrame`. */
+export const ALIGN_FRAME_RAW: Record<AlignFrame, number> = { selection: 0, canvas: 1 };
+
+/** Wire values for `AlignEdge`. */
+export const ALIGN_EDGE_RAW: Record<AlignEdge, number> = {
+  left: 0,
+  hcenter: 1,
+  right: 2,
+  top: 3,
+  vcenter: 4,
+  bottom: 5,
+};
+
+/** The edges an align panel offers, in the order the ABI numbers them. */
+export const ALIGN_EDGES: readonly AlignEdge[] = [
+  "left",
+  "hcenter",
+  "right",
+  "top",
+  "vcenter",
+  "bottom",
+] as const;
 
 /** Error codes — see `abi::ERR_*`. */
 export const ERR = {
@@ -149,7 +225,31 @@ export interface NodeSpec {
   m: number[];
   fill: Rgba;
   visible: boolean;
+  /** Group id, `0` or absent when the node is not in a group. */
+  group?: number;
   path: Subpath[];
+}
+
+/** One snap guide: a line the editor drew to explain a correction. */
+export interface SnapGuide {
+  /** `0` = a vertical line at `position` in x, `1` = a horizontal line in y. */
+  axis: number;
+  /** `GUIDE_KIND.*`: what the line came from. */
+  kind: number;
+  /** The line's coordinate on its own axis. */
+  position: number;
+  /** Where the line starts on the other axis. */
+  from: number;
+  /** Where the line ends on the other axis. */
+  to: number;
+}
+
+/** The answer to one `SNAP` request. */
+export interface SnapResult {
+  /** The corrected delta the UI should actually move by. */
+  dx: number;
+  dy: number;
+  guides: SnapGuide[];
 }
 
 /** A box: min x, min y, max x, max y. */
@@ -170,7 +270,12 @@ export type EditorCommand =
   | { kind: "visible"; to: boolean }
   | { kind: "reorder"; up: boolean }
   | { kind: "duplicate"; dx: number; dy: number }
-  | { kind: "delete" };
+  | { kind: "delete" }
+  | { kind: "scaleXY"; sx: number; sy: number; pivot: Point }
+  | { kind: "arrange"; to: ArrangeTo }
+  | { kind: "align"; frame: AlignFrame; edge: AlignEdge }
+  | { kind: "group" }
+  | { kind: "ungroup" };
 
 /** Packs an `f32` into its bit pattern. */
 export function f2w(value: number): number {
@@ -250,7 +355,14 @@ export function encodeDoc(width: number, height: number, nodes: NodeSpec[]): Uin
       throw new RangeError(`node ${node.id} has a non-finite start point`);
     }
     const path = encodePath(node.path);
-    out.push(node.id, ...node.m.map(f2w), packRgba(node.fill), node.visible ? 1 : 0, path.length);
+    out.push(
+      node.id,
+      ...node.m.map(f2w),
+      packRgba(node.fill),
+      node.visible ? 1 : 0,
+      node.group ?? 0,
+      path.length,
+    );
     out.push(...path);
   }
   out[3] = out.length;
@@ -311,12 +423,13 @@ export function decodeNodeRecords(
     const m = Array.from({ length: 6 }, (_, k) => w2f(words[at + 1 + k]));
     const fill = unpackRgba(words[at + 7]);
     const visible = words[at + 8] !== 0;
-    const pathWords = words[at + 9];
+    const group = words[at + NODE_GROUP_SLOT];
+    const pathWords = words[at + NODE_PATH_SLOT];
     const { path, words: read } = decodePath(words, at + NODE_RECORD_HEADER);
     if (read !== pathWords) {
       throw new RangeError(`node ${id} declares ${pathWords} path words but carries ${read}`);
     }
-    nodes.push({ id, m, fill, visible, path });
+    nodes.push({ id, m, fill, visible, group, path });
     at += NODE_RECORD_HEADER + pathWords;
   }
   return nodes;
@@ -353,8 +466,76 @@ export function encodeCommand(command: EditorCommand): Uint32Array {
       return Uint32Array.from([OP.DUPLICATE, f2w(command.dx), f2w(command.dy)]);
     case "delete":
       return Uint32Array.from([OP.DELETE]);
+    case "scaleXY":
+      return Uint32Array.from([
+        OP.SCALE_XY,
+        f2w(command.sx),
+        f2w(command.sy),
+        f2w(command.pivot.x),
+        f2w(command.pivot.y),
+      ]);
+    case "arrange":
+      return Uint32Array.from([OP.ARRANGE, ARRANGE_RAW[command.to]]);
+    case "align":
+      return Uint32Array.from([
+        OP.ALIGN,
+        ALIGN_FRAME_RAW[command.frame],
+        ALIGN_EDGE_RAW[command.edge],
+      ]);
+    case "group":
+      return Uint32Array.from([OP.GROUP]);
+    case "ungroup":
+      return Uint32Array.from([OP.UNGROUP]);
   }
 }
+
+/**
+ * Encodes a `SNAP` request.
+ *
+ * `tolerance` is in document units; `flags` is a mask of the `SNAP.*` families
+ * the user has switched on. With none of them set the module hands the delta
+ * back unchanged — that is "snapping off", not an error.
+ */
+export function encodeSnapRequest(
+  dx: number,
+  dy: number,
+  tolerance: number,
+  flags: number,
+  gridStep: number,
+): Uint32Array {
+  return Uint32Array.from([f2w(dx), f2w(dy), f2w(tolerance), flags, f2w(gridStep)]);
+}
+
+/**
+ * Reads a `SNAP` answer out of the output table.
+ *
+ * The module writes `[dx, dy, guide count, guide records…, 0]` and terminates
+ * the list, so the walk is driven by the count and the terminator is checked
+ * rather than trusted.
+ */
+export function decodeSnapResult(words: Uint32Array): SnapResult {
+  const dx = w2f(words[0]);
+  const dy = w2f(words[1]);
+  const count = Math.min(words[2], MAX_SNAP_GUIDES);
+  const guides: SnapGuide[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = 3 + i * GUIDE_WORDS;
+    guides.push({
+      axis: words[at],
+      kind: words[at + 1],
+      position: w2f(words[at + 2]),
+      from: w2f(words[at + 3]),
+      to: w2f(words[at + 4]),
+    });
+  }
+  if (words[3 + count * GUIDE_WORDS] !== 0) {
+    throw new RangeError("the snap guide list is not terminated");
+  }
+  return { dx, dy, guides };
+}
+
+/** Words a `SNAP` answer can occupy at most (header + guides + terminator). */
+export const SNAP_ANSWER_WORDS = 3 + MAX_SNAP_GUIDES * GUIDE_WORDS + 1;
 
 /** Unpacks UTF-8 text from `count` words of the output table. */
 export function decodeText(words: Uint32Array, bytes: number): string {

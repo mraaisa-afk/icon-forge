@@ -10,9 +10,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { EditorSession } from "../wasm/editor";
-import { KIND, type NodeSpec, type Subpath } from "../wasm/abi";
+import { KIND, SNAP, type NodeSpec, type Subpath } from "../wasm/abi";
 import { artifactAvailable as available, loadArtifact } from "../wasm/artifact";
-import { useEditor, nodeFromSvg, EDITOR_ICON_LIMIT } from "./editorStore";
+import { editorSession, useEditor, nodeFromSvg, EDITOR_ICON_LIMIT } from "./editorStore";
+import { SNAP_DEFAULTS } from "../components/editor/canvasModel";
 
 function square(x: number, y: number, size: number): Subpath {
   return {
@@ -176,5 +177,172 @@ describe.skipIf(!available)("editor store mirroring the engine", () => {
     // it no longer answers a pick: hidden nodes are skipped by hit testing.
     useEditor.getState().click(15, 15, false);
     expect(useEditor.getState().selection).toEqual([]);
+  });
+});
+
+describe.skipIf(!available)("editor store 4B surface", () => {
+  it("snaps a proposed move, draws the guides, and passes through when off", async () => {
+    await adoptFixture();
+    const state = useEditor.getState();
+    // Node 1 sits at x 10..30, y 10..30; the canvas is 200x120.
+    state.click(15, 15, false);
+    expect(useEditor.getState().selectionBox).toEqual({ x0: 10, y0: 10, x1: 30, y1: 30 });
+
+    // Canvas snapping pulls a nearly-aligned nudge onto the canvas edge (x = 0).
+    useEditor.getState().setSnap({ nodes: false, grid: false, canvas: true, tolerance: 3 });
+    const snapped = useEditor.getState().snapMove(-8.5, 0);
+    expect(snapped.dx).toBe(-10);
+    expect(snapped.guides.length).toBeGreaterThan(0);
+    expect(useEditor.getState().guides.length).toBe(snapped.guides.length);
+
+    // With every family switched off the delta comes back untouched and no
+    // guide is remembered from the previous answer.
+    useEditor.getState().setSnap({ canvas: false, nodes: false, grid: false });
+    const raw = useEditor.getState().snapMove(-8.5, 2.25);
+    expect(raw.dx).toBe(-8.5);
+    expect(raw.dy).toBe(2.25);
+    expect(raw.guides).toEqual([]);
+
+    // The grid is a family of its own, with its own step: the box's left edge
+    // (10 + 7 = 17) is one unit from the 16 line, so the delta loses that unit.
+    useEditor.getState().setSnap({ grid: true, gridStep: 8, tolerance: 6 });
+    const grid = useEditor.getState().snapMove(7, 0);
+    expect(grid.dx).toBe(6);
+    expect(grid.guides.length).toBeGreaterThan(0);
+    expect(grid.guides.every((guide) => guide.kind === 4)).toBe(true);
+    expect(grid.guides.every((guide) => Math.abs(guide.position % 8) < 1e-4)).toBe(true);
+  });
+
+  it("previews a gesture and commits exactly what it showed", async () => {
+    await adoptFixture();
+    useEditor.getState().click(15, 15, false);
+    const command = { kind: "translate", dx: 11, dy: 7 } as const;
+
+    useEditor.getState().preview(command);
+    let state = useEditor.getState();
+    expect(state.previewing).toEqual(command);
+    // The engine's box follows the preview; the React mirror and the history
+    // are deliberately not re-read during a drag (that is the point of a
+    // preview: a gesture does not copy the node list per frame).
+    expect(state.selectionBox).toEqual({ x0: 10, y0: 10, x1: 30, y1: 30 });
+    expect(state.history.undoable).toBe(0);
+    const session = editorSession();
+    expect(session?.boundsOf(1)).toEqual({ x0: 21, y0: 17, x1: 41, y1: 37 });
+    expect(session?.selectionBounds()).toEqual({ x0: 21, y0: 17, x1: 41, y1: 37 });
+
+    useEditor.getState().commit(command);
+    state = useEditor.getState();
+    expect(state.previewing).toBeNull();
+    expect(state.history.undoable).toBe(1);
+    expect(state.history.undoLabel).toBe("move"); // the engine's own label
+    expect(state.selectionBox).toEqual({ x0: 21, y0: 17, x1: 41, y1: 37 });
+    expect(state.nodes[0].m.slice(4)).toEqual([11, 7]);
+
+    // Cancelling drops the engine's preview and the guides with it.
+    useEditor.getState().preview({ kind: "translate", dx: 100, dy: 0 });
+    useEditor.getState().setGuides([{ axis: 0, kind: 2, position: 1, from: 0, to: 10 }]);
+    useEditor.getState().cancelPreview();
+    state = useEditor.getState();
+    expect(state.previewing).toBeNull();
+    expect(state.guides).toEqual([]);
+    expect(session?.boundsOf(1)).toEqual({ x0: 21, y0: 17, x1: 41, y1: 37 });
+  });
+
+  it("drives align, arrange, resize and rotate through the panels", async () => {
+    await adoptFixture();
+    useEditor.getState().selectAll();
+    useEditor.getState().align("selection", "left");
+    let state = useEditor.getState();
+    // Node 1 is already at x0 = 10; node 2 moves from 60 to 10.
+    expect(state.nodes[1].m.slice(4)).toEqual([10, 10]);
+    expect(state.note).toMatch(/align left · 1 node/);
+    useEditor.getState().undo();
+
+    // Node 1 is the back-most node, so sending it further back is refused…
+    useEditor.getState().click(15, 15, false);
+    useEditor.getState().arrange("back");
+    state = useEditor.getState();
+    expect(state.nodes[0].id).toBe(1);
+    expect(state.history.undoable).toBe(0);
+    expect(state.note).toMatch(/nothing would change/);
+    // …and bringing it to the front really does reorder the document.
+    useEditor.getState().arrange("front");
+    state = useEditor.getState();
+    expect(state.history.undoLabel).toBe("arrange"); // the engine's own label
+    expect(state.nodes[1].id).toBe(1);
+    useEditor.getState().undo();
+    expect(useEditor.getState().nodes[0].id).toBe(1);
+
+    // Resizing is a ScaleXY about the selection's top-left corner.
+    useEditor.getState().selectAll();
+    useEditor.getState().click(15, 15, false);
+    useEditor.getState().resize({ width: 140, height: 40 });
+    state = useEditor.getState();
+    expect(state.note).toMatch(/resize · 1 node/);
+    expect(state.selectionBox).toEqual({ x0: 10, y0: 10, x1: 150, y1: 50 });
+    useEditor.getState().undo();
+
+    useEditor.getState().click(15, 15, false);
+    useEditor.getState().rotate(90);
+    state = useEditor.getState();
+    expect(state.note).toMatch(/rotate · 1 node/);
+    // A 20x20 square turned 90° about its centre is the same square — to
+    // within the f32 rounding a real rotation introduces.
+    expect(state.selectionBox?.x0).toBeCloseTo(10, 4);
+    expect(state.selectionBox?.y0).toBeCloseTo(10, 4);
+    expect(state.selectionBox?.x1).toBeCloseTo(30, 4);
+    expect(state.selectionBox?.y1).toBeCloseTo(30, 4);
+    useEditor.getState().undo();
+
+    // Rotating without a selection is a note, not a crash.
+    useEditor.getState().clearSelection();
+    useEditor.getState().rotate(90);
+    expect(useEditor.getState().note).toMatch(/select something first/);
+    console.log(
+      "evidence: editor panels — align, arrange, resize and rotate driven through the store: every " +
+        "command is one history step, and a refusal is reported instead of thrown",
+    );
+  });
+
+  it("groups a selection so one click drags all of it", async () => {
+    await adoptFixture();
+    useEditor.getState().selectAll();
+    useEditor.getState().group();
+    let state = useEditor.getState();
+    expect(state.history.undoLabel).toBe("group");
+    expect(state.nodes.map((node) => node.group)).toEqual([1, 1]);
+
+    // Clicking one member selects the whole group, and a move carries it along.
+    useEditor.getState().click(15, 15, false);
+    state = useEditor.getState();
+    expect(state.selection).toEqual([1, 2]);
+    useEditor.getState().nudge(4, 0);
+    state = useEditor.getState();
+    expect(state.nodes.map((node) => node.m[4])).toEqual([4, 64]);
+    useEditor.getState().undo();
+
+    useEditor.getState().click(15, 15, false);
+    useEditor.getState().ungroup();
+    state = useEditor.getState();
+    expect(state.nodes.map((node) => node.group)).toEqual([0, 0]);
+    useEditor.getState().click(15, 15, false);
+    expect(useEditor.getState().selection).toEqual([1]);
+  });
+
+  it("keeps the snap settings and reports them", async () => {
+    await adoptFixture();
+    useEditor.getState().setSnap({ ...SNAP_DEFAULTS }); // the store is a singleton
+    expect(useEditor.getState().snap).toEqual({
+      canvas: true,
+      nodes: true,
+      grid: false,
+      gridStep: 8,
+      tolerance: 6,
+    });
+    useEditor.getState().setSnap({ grid: true, gridStep: 16 });
+    const state = useEditor.getState();
+    expect(state.snap.grid).toBe(true);
+    expect(state.snap.gridStep).toBe(16);
+    expect(SNAP.GRID).toBe(4);
   });
 });

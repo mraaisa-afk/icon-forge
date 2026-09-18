@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { ERR, KIND, type EditorCommand, type NodeSpec, type Subpath } from "./abi";
+import { ERR, GUIDE_KIND, KIND, SNAP, type EditorCommand, type NodeSpec, type Subpath } from "./abi";
 import { EditorSession } from "./editor";
 import { artifactAvailable as available, loadArtifact } from "./artifact";
 
@@ -65,7 +65,7 @@ async function freshSession(): Promise<EditorSession> {
 describe.skipIf(!available)("EditorSession against the real module", () => {
   it("checks the ABI level it was built against", async () => {
     const session = await EditorSession.fromBytes(bytes);
-    expect(session.abiVersion).toBe(1);
+    expect(session.abiVersion).toBe(2);
     expect(session.compatible).toBe(true);
     console.log(
       `evidence: editor module — ${bytes.length} bytes, ABI v${session.abiVersion}, memory ${session.exports.memory.buffer.byteLength} bytes at first call`,
@@ -191,11 +191,170 @@ describe.skipIf(!available)("EditorSession against the real module", () => {
     if (!nothingToUndo.ok) expect(nothingToUndo.error).toBe(ERR.NO_HISTORY);
   });
 
+  it("snaps a proposed move and explains the correction", async () => {
+    const session = await freshSession();
+    session.selectOnly(2); // x 50..80, y 20..50
+
+    // Grid only: the +7 nudge lands the centre on a multiple of 8 in x, so no
+    // x correction is needed, while the y edge is two units off it.
+    const grid = session.snapMove(7, 0, { tolerance: 6, flags: SNAP.GRID, gridStep: 8 });
+    expect(grid.ok).toBe(true);
+    if (grid.ok) {
+      expect(grid.value.dx).toBeCloseTo(7, 3);
+      expect(grid.value.dy).toBe(-2);
+      expect(grid.value.guides).toHaveLength(2);
+      expect(grid.value.guides.map((guide) => guide.axis)).toEqual([0, 1]);
+      expect(grid.value.guides.every((guide) => guide.kind === GUIDE_KIND.GRID)).toBe(true);
+      expect(grid.value.guides.every((guide) => Math.abs(guide.position % 8) < 1e-4)).toBe(true);
+    }
+
+    // Snapping to other nodes' edges: node 1's box is 10..30, and node 2 moved
+    // by (-40, 0) would put its left edge on node 1's right edge (30).
+    const nodeEdge = session.snapMove(-21, 0, { tolerance: 2, flags: SNAP.NODES, gridStep: 0 });
+    expect(nodeEdge.ok).toBe(true);
+    if (nodeEdge.ok) {
+      expect(nodeEdge.value.dx).toBe(-20);
+      expect(nodeEdge.value.guides[0]?.kind).toBe(GUIDE_KIND.NODE_EDGE);
+      expect(nodeEdge.value.guides[0]?.position).toBe(30);
+    }
+
+    // No family switched on is "snapping off", not an error: the delta passes
+    // through untouched, with nothing to draw.
+    const off = session.snapMove(3.25, -1.5, { tolerance: 6, flags: 0, gridStep: 8 });
+    expect(off.ok).toBe(true);
+    if (off.ok) {
+      expect(off.value.dx).toBe(3.25);
+      expect(off.value.dy).toBe(-1.5);
+      expect(off.value.guides).toEqual([]);
+    }
+
+    // A flag bit the ABI does not define is refused rather than guessed at.
+    const bad = session.snapMove(1, 1, { tolerance: 6, flags: SNAP.GRID | 8, gridStep: 8 });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toBe(ERR.BAD_ARGUMENT);
+    // …and an empty selection has nothing to snap.
+    session.clearSelection();
+    const nothing = session.snapMove(1, 1, { tolerance: 6, flags: SNAP.CANVAS, gridStep: 0 });
+    expect(nothing.ok).toBe(false);
+    if (!nothing.ok) expect(nothing.error).toBe(ERR.NO_SELECTION);
+  });
+
+  it("previews a transform without recording it, then commits it identically", async () => {
+    const session = await freshSession();
+    session.selectOnly(2);
+    const stored = { x0: 50, y0: 20, x1: 80, y1: 50 };
+    expect(session.boundsOf(2)).toEqual(stored);
+    const command: EditorCommand = { kind: "translate", dx: 11, dy: 7 };
+
+    const previewed = session.preview(command);
+    expect(previewed.ok).toBe(true);
+    expect(session.previewing).toEqual(command);
+    // What the view reports follows the preview…
+    expect(session.boundsOf(2)).toEqual({ x0: 61, y0: 27, x1: 91, y1: 57 });
+    expect(session.selectionBounds()).toEqual({ x0: 61, y0: 27, x1: 91, y1: 57 });
+    expect(session.nodes()[1].m).toEqual([1, 0, 0, 1, 61, 27]);
+    // …but the document and the history do not.
+    expect(session.history().canUndo).toBe(false);
+    expect(session.undo().ok).toBe(false);
+
+    session.clearPreview();
+    expect(session.previewing).toBeNull();
+    expect(session.boundsOf(2)).toEqual(stored);
+
+    // Committing the same spec lands on exactly the geometry the preview showed.
+    const applied = session.apply(command);
+    expect(applied.ok).toBe(true);
+    expect(session.boundsOf(2)).toEqual({ x0: 61, y0: 27, x1: 91, y1: 57 });
+    expect(session.history().undoable).toBe(1);
+
+    // Any edit drops a live preview, so the mirror cannot outlive the engine's.
+    expect(session.preview(command).ok).toBe(true);
+    expect(session.previewing).toEqual(command);
+    session.apply({ kind: "translate", dx: 1, dy: 0 });
+    expect(session.previewing).toBeNull();
+    console.log(
+      "evidence: editor preview — a live transform previewed (node records and selection box followed it, " +
+        "no history step) and then committed to identical geometry as exactly one step",
+    );
+    session.close();
+  });
+
+  it("groups, moves the whole group, and ungroups", async () => {
+    const session = await freshSession();
+    expect(session.selectAll()).toBe(3);
+    const grouped = session.apply({ kind: "group" });
+    expect(grouped.ok).toBe(true);
+    const groups = session.nodes().map((node) => node.group);
+    expect(groups[0]).not.toBe(0);
+    expect(groups).toEqual([groups[0], groups[0], groups[0]]);
+
+    // Selecting one member selects the group: a drag moves all three together.
+    session.clearSelection();
+    expect(session.selectOnly(2)).toBe(3);
+    expect(session.selection()).toEqual([1, 2, 3]);
+    expect(session.apply({ kind: "translate", dx: 4, dy: 0 }).ok).toBe(true);
+    expect(session.boundsOf(1)).toEqual({ x0: 14, y0: 10, x1: 34, y1: 30 });
+    expect(session.boundsOf(2)).toEqual({ x0: 54, y0: 20, x1: 84, y1: 50 });
+
+    session.undo();
+    expect(session.apply({ kind: "ungroup" }).ok).toBe(true);
+    expect(session.nodes().map((node) => node.group)).toEqual([0, 0, 0]);
+    // Ungrouped nodes select independently again.
+    session.clearSelection();
+    expect(session.selectOnly(2)).toBe(1);
+    session.close();
+  });
+
+  it("aligns, arranges and resizes through the adapter", async () => {
+    const session = await freshSession();
+    // The third node is scaled by 2 and sits at the canvas origin, so the
+    // selection's own left edge is x = 0 and both visible squares move there.
+    session.selectAll();
+    const aligned = session.apply({ kind: "align", frame: "selection", edge: "left" });
+    expect(aligned.ok).toBe(true);
+    expect(session.boundsOf(1)).toEqual({ x0: 0, y0: 10, x1: 20, y1: 30 });
+    expect(session.boundsOf(2)).toEqual({ x0: 0, y0: 20, x1: 30, y1: 50 });
+    session.undo();
+
+    // Aligning to the canvas is a different frame, with the same result here
+    // because that is where the selection's left edge already is.
+    session.selectAll();
+    expect(session.apply({ kind: "align", frame: "canvas", edge: "left" }).ok).toBe(true);
+    expect(session.boundsOf(1)).toEqual({ x0: 0, y0: 10, x1: 20, y1: 30 });
+    expect(session.boundsOf(3)).toEqual({ x0: 0, y0: -10, x1: 20, y1: 0 });
+    session.undo();
+
+    const order = (): number[] => [0, 1, 2].map((index) => session.nodes()[index]?.id ?? 0);
+    const before = order();
+    session.selectOnly(before[0]);
+    expect(session.apply({ kind: "arrange", to: "front" }).ok).toBe(true);
+    expect(order()[2]).toBe(before[0]);
+    session.undo();
+    expect(order()).toEqual(before);
+
+    session.selectAll();
+    expect(session.apply({ kind: "scaleXY", sx: 2, sy: 0.5, pivot: { x: 0, y: 0 } }).ok).toBe(
+      true,
+    );
+    expect(session.boundsOf(1)).toEqual({ x0: 20, y0: 5, x1: 60, y1: 15 });
+    expect(session.boundsOf(2)).toEqual({ x0: 100, y0: 10, x1: 160, y1: 25 });
+    session.undo();
+    expect(session.boundsOf(1)).toEqual({ x0: 10, y0: 10, x1: 30, y1: 30 });
+    expect(session.history().canUndo).toBe(false);
+    console.log(
+      "evidence: editor 4B commands — align (both frames), arrange, scaleXY and group/ungroup applied " +
+        "and undone through the adapter, one history step each",
+    );
+    session.close();
+  });
+
   it("performs the Phase 4 exit criterion through the adapter", async () => {
     const session = await freshSession();
     const snapshot = (): string =>
       JSON.stringify([
-        session.nodes().map((node) => [node.id, node.m, node.fill, node.visible, node.path]),
+        session
+          .nodes()
+          .map((node) => [node.id, node.m, node.fill, node.visible, node.group, node.path]),
         session.selection(),
       ]);
     let seed = 0x2f6e2b1;
@@ -213,6 +372,17 @@ describe.skipIf(!available)("EditorSession against the real module", () => {
       () => ({ kind: "reorder", up: rnd() < 0.5 }),
       () => ({ kind: "center" }),
       () => ({ kind: "delete" }),
+      () => ({
+        kind: "scaleXY",
+        sx: 0.5 + rnd(),
+        sy: 0.5 + rnd(),
+        pivot: { x: 20, y: 20 },
+      }),
+      () => ({ kind: "align", frame: "selection", edge: "left" }),
+      () => ({ kind: "align", frame: "canvas", edge: "vcenter" }),
+      () => ({ kind: "arrange", to: rnd() < 0.5 ? "front" : "back" }),
+      () => ({ kind: "group" }),
+      () => ({ kind: "ungroup" }),
     ];
     let applied = 0;
     for (let step = 0; step < 1000; step++) {

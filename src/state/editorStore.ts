@@ -16,8 +16,22 @@
 
 import { create } from "zustand";
 
-import type { Box, EditorCommand, NodeSpec, Rgba } from "../wasm/abi";
+import type {
+  AlignEdge,
+  AlignFrame,
+  ArrangeTo,
+  Box,
+  EditorCommand,
+  NodeSpec,
+  Rgba,
+  SnapGuide,
+} from "../wasm/abi";
 import { EditorSession, type HistoryView } from "../wasm/editor";
+import {
+  SNAP_DEFAULTS,
+  snapFlags,
+  type SnapSettings,
+} from "../components/editor/canvasModel";
 import { parsePathData, readSvgPaths } from "../wasm/svgPath";
 import { backend, type Box4, type SheetDto } from "../lib/backend";
 
@@ -75,6 +89,14 @@ export interface EditorState {
   /** How many icons were loaded versus how many the sheet has. */
   loadedIcons: number;
   availableIcons: number;
+  /** The selection's box, as the engine reports it (previews included). */
+  selectionBox: Box | null;
+  /** What snapping is allowed to use, and how close counts. */
+  snap: SnapSettings;
+  /** Guides the last snap answered with — the overlay draws these. */
+  guides: SnapGuide[];
+  /** The command a live gesture is previewing, if any. */
+  previewing: EditorCommand | null;
 
   /** Loads the module (once) and the listed icons as an editable document. */
   open: (sheet: SheetDto, boxes: readonly Box4[]) => Promise<void>;
@@ -104,6 +126,28 @@ export interface EditorState {
   duplicate: () => void;
   remove: () => void;
   nudge: (dx: number, dy: number) => void;
+
+  // -- 4B: transforms, groups, snapping --------------------------------------
+  /** Changes one snapping setting (the grid step and tolerance included). */
+  setSnap: (patch: Partial<SnapSettings>) => void;
+  /** Asks where a proposed move lands, and records the guides to draw. */
+  snapMove: (dx: number, dy: number) => { dx: number; dy: number; guides: SnapGuide[] };
+  /** Shows a transform the engine has not recorded (a gesture in progress). */
+  preview: (command: EditorCommand) => void;
+  /** Commits the command the preview showed, as exactly one history step. */
+  commit: (command: EditorCommand) => void;
+  /** Drops the preview and its guides (a cancelled gesture). */
+  cancelPreview: () => void;
+  /** Replaces the guides the overlay draws (the canvas clears them). */
+  setGuides: (guides: SnapGuide[]) => void;
+  align: (frame: AlignFrame, edge: AlignEdge) => void;
+  arrange: (to: ArrangeTo) => void;
+  group: () => void;
+  ungroup: () => void;
+  /** Resizes the selection to a width and/or height in document units. */
+  resize: (size: { width?: number; height?: number }) => void;
+  /** Turns the selection about its centre. */
+  rotate: (degrees: number) => void;
 }
 
 /** The live session, outside React state: it is not serialisable and never rendered. */
@@ -131,12 +175,13 @@ export function nodeFromSvg(id: number, svg: string): NodeSpec | null {
 export const useEditor = create<EditorState>((set, get) => {
   const sync = (): void => {
     if (!session) {
-      set({ nodes: [], selection: [], history: EMPTY_HISTORY });
+      set({ nodes: [], selection: [], selectionBox: null, guides: [], history: EMPTY_HISTORY });
       return;
     }
     set({
       nodes: session.nodes(),
       selection: session.selection(),
+      selectionBox: session.selectionBounds(),
       history: session.history(),
       revision: session.revision,
     });
@@ -174,6 +219,10 @@ export const useEditor = create<EditorState>((set, get) => {
     revision: 0,
     loadedIcons: 0,
     availableIcons: 0,
+    selectionBox: null,
+    snap: SNAP_DEFAULTS,
+    guides: [],
+    previewing: null,
 
     async open(sheet, boxes) {
       set({
@@ -261,6 +310,9 @@ export const useEditor = create<EditorState>((set, get) => {
         loadedIcons: 0,
         availableIcons: 0,
         sheetId: null,
+        selectionBox: null,
+        guides: [],
+        previewing: null,
       });
     },
 
@@ -347,6 +399,100 @@ export const useEditor = create<EditorState>((set, get) => {
 
     nudge(dx, dy) {
       edit({ kind: "translate", dx, dy }, "move");
+    },
+
+    // -- 4B: transforms, groups, snapping ------------------------------------
+
+    setSnap(patch) {
+      set({ snap: { ...get().snap, ...patch } });
+    },
+
+    snapMove(dx, dy) {
+      if (!session) return { dx, dy, guides: [] };
+      const flags = snapFlags(get().snap);
+      if (flags === 0) return { dx, dy, guides: [] };
+      const answer = session.snapMove(dx, dy, {
+        tolerance: get().snap.tolerance,
+        flags,
+        gridStep: get().snap.gridStep,
+      });
+      if (!answer.ok) {
+        // Nothing to snap to (or a refused request): the raw delta stands.
+        set({ note: answer.message, guides: [] });
+        return { dx, dy, guides: [] };
+      }
+      set({ guides: answer.value.guides });
+      return answer.value;
+    },
+
+    preview(command) {
+      if (!session) return;
+      const result = session.preview(command);
+      // A gesture in progress must not spam the status line, but a refusal has
+      // to say why nothing is moving.
+      set(result.ok ? { previewing: command } : { previewing: null, note: result.message });
+    },
+
+    commit(command) {
+      edit(command, command.kind);
+      set({ previewing: null, guides: [] });
+    },
+
+    cancelPreview() {
+      session?.clearPreview();
+      set({ previewing: null, guides: [] });
+    },
+
+    setGuides(guides) {
+      set({ guides });
+    },
+
+    align(frame, edge) {
+      edit({ kind: "align", frame, edge }, `align ${edge}`);
+    },
+
+    arrange(to) {
+      edit({ kind: "arrange", to }, `bring to ${to}`);
+    },
+
+    group() {
+      edit({ kind: "group" }, "group");
+    },
+
+    ungroup() {
+      edit({ kind: "ungroup" }, "ungroup");
+    },
+
+    resize(size) {
+      if (!session) return;
+      const box = session.selectionBounds();
+      if (!box) {
+        set({ note: "select something first" });
+        return;
+      }
+      const width = size.width ?? box.x1 - box.x0;
+      const height = size.height ?? box.y1 - box.y0;
+      const spanX = box.x1 - box.x0;
+      const spanY = box.y1 - box.y0;
+      if (spanX <= 0 || spanY <= 0 || width <= 0 || height <= 0) {
+        set({ note: "a selection needs a positive size to resize from" });
+        return;
+      }
+      edit(
+        { kind: "scaleXY", sx: width / spanX, sy: height / spanY, pivot: { x: box.x0, y: box.y0 } },
+        "resize",
+      );
+    },
+
+    rotate(degrees) {
+      if (!session) return;
+      const box = session.selectionBounds();
+      if (!box) {
+        set({ note: "select something first" });
+        return;
+      }
+      const pivot = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
+      edit({ kind: "rotate", degrees, pivot }, "rotate");
     },
   };
 });

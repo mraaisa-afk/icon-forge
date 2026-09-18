@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import { fitView, gestureFor, isDrag, marqueeBox, toDocPoint, toScreenPoint } from "./canvasModel";
+import {
+  applyAffine,
+  boxAfterCommand,
+  commandAffine,
+  fitView,
+  gestureFor,
+  handlePositions,
+  hitHandle,
+  isDrag,
+  marqueeBox,
+  rotateCommandFor,
+  scaleCommandFor,
+  snapFlags,
+  SNAP_DEFAULTS,
+  toDocPoint,
+  toScreenPoint,
+  wrapDegrees,
+} from "./canvasModel";
 
 describe("fitView", () => {
   it("fits a wide document to the width and centres it", () => {
@@ -71,5 +88,134 @@ describe("isDrag", () => {
     expect(isDrag(0, 0)).toBe(false);
     expect(isDrag(0.3, 0.3)).toBe(false);
     expect(isDrag(1, 0)).toBe(true);
+  });
+});
+
+const VIEW = { scale: 2, offsetX: 10, offsetY: 5 };
+const BOX = { x0: 10, y0: 20, x1: 60, y1: 70 };
+
+describe("transform handles", () => {
+  it("puts the eight handles on the box corners and edges, and the grip above", () => {
+    const handles = handlePositions(BOX, VIEW);
+    // Corners map through the view; the rotate grip floats above the top edge.
+    expect(handles.nw).toEqual(toScreenPoint(10, 20, VIEW));
+    expect(handles.se).toEqual(toScreenPoint(60, 70, VIEW));
+    expect(handles.e.x).toBe(toScreenPoint(60, 45, VIEW).x);
+    expect(handles.n.y).toBe(handles.nw.y);
+    expect(handles.rotate.x).toBeCloseTo((handles.nw.x + handles.se.x) / 2, 6);
+    expect(handles.rotate.y).toBeLessThan(handles.nw.y);
+  });
+
+  it("grabs the nearest handle and nothing far away", () => {
+    const handles = handlePositions(BOX, VIEW);
+    expect(hitHandle(handles.ne, BOX, VIEW)).toBe("ne");
+    expect(hitHandle({ x: handles.rotate.x, y: handles.rotate.y }, BOX, VIEW)).toBe("rotate");
+    expect(hitHandle({ x: 0, y: 0 }, BOX, VIEW)).toBeNull();
+    // Just inside the grab radius counts, just outside does not.
+    const near = { x: handles.se.x + 8, y: handles.se.y };
+    expect(hitHandle(near, BOX, VIEW)).toBe("se");
+    expect(hitHandle({ x: handles.se.x + 40, y: handles.se.y + 40 }, BOX, VIEW)).toBeNull();
+  });
+
+  it("scales a corner uniformly about the opposite corner", () => {
+    // Dragging the south-east corner of a 50x50 box twice as far from the
+    // north-west pivot doubles it.
+    const command = scaleCommandFor("se", BOX, { x: 110, y: 120 }, { uniform: true });
+    expect(command).toEqual({ kind: "scale", factor: 2, pivot: { x: 10, y: 20 } });
+    // The uniform factor follows the diagonal, so the aspect cannot drift.
+    const skewed = scaleCommandFor("se", BOX, { x: 110, y: 20 }, { uniform: true });
+    expect(skewed?.kind).toBe("scale");
+    if (skewed?.kind === "scale") expect(skewed.factor).toBeCloseTo(Math.SQRT2, 6);
+    // The pivot (the opposite corner) never moves.
+    expect(applyAffine(commandAffine(skewed!)!, { x: 10, y: 20 })).toEqual({ x: 10, y: 20 });
+  });
+
+  it("scales freely with Shift, and one axis only from an edge handle", () => {
+    const free = scaleCommandFor("se", BOX, { x: 110, y: 45 }, { uniform: false });
+    expect(free).toEqual({ kind: "scaleXY", sx: 2, sy: 0.5, pivot: { x: 10, y: 20 } });
+    const edge = scaleCommandFor("e", BOX, { x: 110, y: 999 }, { uniform: false });
+    expect(edge).toEqual({ kind: "scaleXY", sx: 2, sy: 1, pivot: { x: 10, y: 45 } });
+    // The top edge dragged twice as far from the bottom edge stretches y only.
+    const vertical = scaleCommandFor("n", BOX, { x: -999, y: -30 }, { uniform: false });
+    expect(vertical).toEqual({ kind: "scaleXY", sx: 1, sy: 2, pivot: { x: 35, y: 70 } });
+  });
+
+  it("scales about the centre when asked, and refuses degenerate drags", () => {
+    // From the centre the same drag is three times the half-diagonal out.
+    const centred = scaleCommandFor("se", BOX, { x: 110, y: 120 }, { uniform: true, fromCenter: true });
+    expect(centred).toEqual({ kind: "scale", factor: 3, pivot: { x: 35, y: 45 } });
+    // Collapsing the box onto its pivot has no scale command that means anything.
+    expect(scaleCommandFor("se", BOX, { x: 10, y: 20 }, { uniform: true })).toBeNull();
+    expect(scaleCommandFor("se", BOX, { x: 10, y: 20 }, { uniform: false })).toBeNull();
+    expect(scaleCommandFor("se", BOX, { x: 60, y: 70 }, { uniform: false })).toBeNull();
+    expect(scaleCommandFor("rotate", BOX, { x: 0, y: 0 }, { uniform: true })).toBeNull();
+  });
+
+  it("rotates about the box centre, snapping to 15 degrees with Shift", () => {
+    const centre = { x: 35, y: 45 };
+    const from = { x: 35, y: 95 }; // straight below the centre
+    // The grip starts below the centre and ends to its right: a quarter turn.
+    const quarter = rotateCommandFor(BOX, from, { x: 85, y: 45 });
+    expect(quarter).toEqual({ kind: "rotate", degrees: -90, pivot: centre });
+    const snapped = rotateCommandFor(BOX, from, { x: 80, y: 40 }, { snap: true });
+    expect(snapped?.kind).toBe("rotate");
+    if (snapped?.kind === "rotate") expect(Math.abs(snapped.degrees % 15)).toBe(0);
+    // A drag that does not turn anything, and a pivot-less box, do nothing.
+    expect(rotateCommandFor(BOX, from, from)).toBeNull();
+    expect(wrapDegrees(370)).toBe(10);
+    expect(wrapDegrees(-190)).toBe(170);
+  });
+});
+
+describe("local previews", () => {
+  it("builds the affine for each transform command", () => {
+    expect(commandAffine({ kind: "translate", dx: 3, dy: -4 })).toEqual([1, 0, 0, 1, 3, -4]);
+    expect(commandAffine({ kind: "scale", factor: 2, pivot: { x: 10, y: 20 } })).toEqual([
+      2, 0, 0, 2, -10, -20,
+    ]);
+    expect(
+      commandAffine({ kind: "scaleXY", sx: 2, sy: 0.5, pivot: { x: 10, y: 20 } }),
+    ).toEqual([2, 0, 0, 0.5, -10, 10]);
+    const rotate = commandAffine({ kind: "rotate", degrees: 90, pivot: { x: 0, y: 0 } });
+    expect(rotate?.[0]).toBeCloseTo(0, 6);
+    expect(rotate?.[1]).toBeCloseTo(1, 6);
+    expect(rotate?.[2]).toBeCloseTo(-1, 6);
+    expect(rotate?.[3]).toBeCloseTo(0, 6);
+    // Commands that are not transforms have no affine to draw with.
+    expect(commandAffine({ kind: "delete" })).toBeNull();
+    expect(commandAffine({ kind: "group" })).toBeNull();
+  });
+
+  it("maps points and boxes through an affine", () => {
+    const m = commandAffine({ kind: "scaleXY", sx: 2, sy: 0.5, pivot: { x: 10, y: 20 } });
+    if (!m) throw new Error("a scaleXY has an affine");
+    expect(applyAffine(m, { x: 10, y: 20 })).toEqual({ x: 10, y: 20 }); // the pivot stays put
+    expect(applyAffine(m, { x: 20, y: 40 })).toEqual({ x: 30, y: 30 });
+    expect(boxAfterCommand(BOX, { kind: "translate", dx: 5, dy: 5 })).toEqual({
+      x0: 15,
+      y0: 25,
+      x1: 65,
+      y1: 75,
+    });
+    // A rotation turns the box into the box around the turned corners.
+    const turned = boxAfterCommand(
+      { x0: 0, y0: 0, x1: 10, y1: 10 },
+      { kind: "rotate", degrees: 45, pivot: { x: 0, y: 0 } },
+    );
+    // A 10x10 square turned 45° about its top-left corner spans x −7.07..7.07
+    // and y 0..14.14.
+    expect(turned.y1).toBeCloseTo(Math.SQRT2 * 10, 4);
+    expect(turned.x1).toBeCloseTo(Math.SQRT2 * 5, 4);
+    expect(turned.x0).toBeCloseTo(-Math.SQRT2 * 5, 4);
+    // Commands that are not transforms leave the box alone.
+    expect(boxAfterCommand(BOX, { kind: "delete" })).toEqual(BOX);
+  });
+
+  it("turns the snap settings into the ABI's flag mask", () => {
+    expect(snapFlags(SNAP_DEFAULTS)).toBe(3); // canvas + nodes
+    expect(snapFlags({ ...SNAP_DEFAULTS, grid: true })).toBe(7);
+    expect(snapFlags({ ...SNAP_DEFAULTS, canvas: false, nodes: false })).toBe(0);
+    expect(SNAP_DEFAULTS.gridStep).toBe(8);
+    expect(SNAP_DEFAULTS.tolerance).toBeGreaterThan(0);
   });
 });

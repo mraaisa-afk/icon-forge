@@ -3,23 +3,49 @@ import { describe, expect, it } from "vitest";
 import {
   decodeNodeRecords,
   decodePath,
+  decodeSnapResult,
   decodeText,
   encodeCommand,
   encodeDoc,
   encodePath,
+  encodeSnapRequest,
   ERR,
   FEATURE,
   f2w,
+  GUIDE_KIND,
+  GUIDE_WORDS,
   KIND,
   MAX_NODES,
+  MAX_SNAP_GUIDES,
   NODE_RECORD_HEADER,
   OP,
   packRgba,
+  PREVIEW,
+  SNAP,
+  SNAP_ANSWER_WORDS,
   unpackRgba,
   w2f,
   type NodeSpec,
   type Subpath,
 } from "./abi";
+
+/** Builds a node-record region the way `NODE_SYNC` writes one. */
+function recordRegion(nodes: readonly NodeSpec[]): Uint32Array {
+  const words: number[] = [];
+  for (const node of nodes) {
+    const path = encodePath(node.path);
+    words.push(
+      node.id,
+      ...node.m.map(f2w),
+      packRgba(node.fill),
+      node.visible ? 1 : 0,
+      node.group ?? 0,
+      path.length,
+      ...path,
+    );
+  }
+  return Uint32Array.from(words);
+}
 
 function square(x: number, y: number, size: number): Subpath {
   return {
@@ -64,7 +90,23 @@ describe("abi constants", () => {
     expect(FEATURE.ERROR).toBe(32);
     expect(ERR.NO_DOCUMENT).toBe(2);
     expect(ERR.NO_HISTORY).toBe(5);
-    expect(NODE_RECORD_HEADER).toBe(10);
+    expect(NODE_RECORD_HEADER).toBe(11);
+    // 4B: the group word, the snap/preview features and the five new commands.
+    expect(FEATURE.SNAP).toBe(37);
+    expect(FEATURE.PREVIEW).toBe(38);
+    expect(OP.GROUP).toBe(10);
+    expect(OP.UNGROUP).toBe(11);
+    expect(OP.ARRANGE).toBe(12);
+    expect(OP.ALIGN).toBe(13);
+    expect(OP.SCALE_XY).toBe(14);
+    expect(SNAP.CANVAS).toBe(1);
+    expect(SNAP.NODES).toBe(2);
+    expect(SNAP.GRID).toBe(4);
+    expect(GUIDE_WORDS).toBe(5);
+    expect(MAX_SNAP_GUIDES).toBe(8);
+    expect(PREVIEW.SET).toBe(0);
+    expect(PREVIEW.CLEAR).toBe(1);
+    expect(SNAP_ANSWER_WORDS).toBe(3 + MAX_SNAP_GUIDES * GUIDE_WORDS + 1);
   });
 
   it("round-trips f32 bits and packed fills", () => {
@@ -95,11 +137,7 @@ describe("document blob", () => {
   it("round-trips through a node-record decode", () => {
     const doc = encodeDoc(200, 120, nodes);
     // Load the records back the way NODE_SYNC presents them: header + path.
-    const records = nodes.map((node) => {
-      const path = encodePath(node.path);
-      return [node.id, ...node.m.map(f2w), packRgba(node.fill), node.visible ? 1 : 0, path.length, ...path];
-    });
-    const flat = Uint32Array.from(records.flat());
+    const flat = recordRegion(nodes);
     const back = decodeNodeRecords(flat, 0, nodes.length);
     expect(back).toHaveLength(3);
     expect(back[0].path).toEqual(nodes[0].path);
@@ -112,19 +150,24 @@ describe("document blob", () => {
   });
 
   it("walks records from an offset and stops at the terminator", () => {
-    const path = encodePath(nodes[0].path);
     const region = Uint32Array.from([
       0xffffffff, // some earlier call's leftovers
       0xffffffff,
-      nodes[0].id,
-      ...nodes[0].m.map(f2w),
-      packRgba(nodes[0].fill),
-      1,
-      path.length,
-      ...path,
+      ...recordRegion([nodes[0]]),
       0, // terminator
     ]);
     expect(decodeNodeRecords(region, 2, 5)).toHaveLength(1);
+  });
+
+  it("carries a group id through the record", () => {
+    const flat = recordRegion([{ ...nodes[0], group: 7 }, nodes[1]]);
+    const back = decodeNodeRecords(flat, 0, 2);
+    expect(back[0].group).toBe(7);
+    expect(back[1].group).toBe(0);
+    // …and the encoder writes the same slot.
+    const doc = encodeDoc(200, 120, [{ ...nodes[0], group: 7 }]);
+    expect(doc[4 + NODE_RECORD_HEADER - 1]).toBe(encodePath(nodes[0].path).length);
+    expect(doc[4 + 9]).toBe(7);
   });
 
   it("rejects a node whose declared path length is a lie", () => {
@@ -135,6 +178,7 @@ describe("document blob", () => {
       ...nodes[0].m.map(f2w),
       packRgba(nodes[0].fill),
       1,
+      0,
       encodePath(nodes[0].path).length,
       ...path,
     ]);
@@ -188,6 +232,73 @@ describe("command specs", () => {
       f2w(2),
     ]);
     expect(Array.from(encodeCommand({ kind: "delete" }))).toEqual([OP.DELETE]);
+  });
+
+  it("lays out the 4B commands too", () => {
+    expect(
+      Array.from(encodeCommand({ kind: "scaleXY", sx: 2, sy: 0.5, pivot: { x: 3, y: 4 } })),
+    ).toEqual([OP.SCALE_XY, f2w(2), f2w(0.5), f2w(3), f2w(4)]);
+    expect(Array.from(encodeCommand({ kind: "arrange", to: "front" }))).toEqual([OP.ARRANGE, 0]);
+    expect(Array.from(encodeCommand({ kind: "arrange", to: "back" }))).toEqual([OP.ARRANGE, 1]);
+    // The edge and frame numbers are the wire values `AlignEdge`/`AlignFrame` define.
+    const edges = ["left", "hcenter", "right", "top", "vcenter", "bottom"] as const;
+    edges.forEach((edge, raw) => {
+      expect(
+        Array.from(encodeCommand({ kind: "align", frame: "selection", edge })),
+      ).toEqual([OP.ALIGN, 0, raw]);
+      expect(Array.from(encodeCommand({ kind: "align", frame: "canvas", edge }))).toEqual([
+        OP.ALIGN,
+        1,
+        raw,
+      ]);
+    });
+    expect(Array.from(encodeCommand({ kind: "group" }))).toEqual([OP.GROUP]);
+    expect(Array.from(encodeCommand({ kind: "ungroup" }))).toEqual([OP.UNGROUP]);
+  });
+});
+
+describe("snap exchange", () => {
+  it("encodes a request as dx, dy, tolerance, flags, grid step", () => {
+    const words = encodeSnapRequest(7, -3, 6, SNAP.NODES | SNAP.GRID, 8);
+    expect(Array.from(words)).toEqual([f2w(7), f2w(-3), f2w(6), SNAP.NODES | SNAP.GRID, f2w(8)]);
+  });
+
+  it("reads the corrected delta, the guides and the terminator", () => {
+    const words = new Uint32Array(SNAP_ANSWER_WORDS);
+    words[0] = f2w(7);
+    words[1] = f2w(-2);
+    words[2] = 2;
+    words[3] = 0;
+    words[4] = GUIDE_KIND.GRID;
+    words[5] = f2w(72);
+    words[6] = f2w(0);
+    words[7] = f2w(120);
+    words[8] = 1;
+    words[9] = GUIDE_KIND.NODE_EDGE;
+    words[10] = f2w(48);
+    words[11] = f2w(10);
+    words[12] = f2w(80);
+    words[13] = 0;
+    const result = decodeSnapResult(words);
+    expect(result.dx).toBe(7);
+    expect(result.dy).toBe(-2);
+    expect(result.guides).toEqual([
+      { axis: 0, kind: GUIDE_KIND.GRID, position: 72, from: 0, to: 120 },
+      { axis: 1, kind: GUIDE_KIND.NODE_EDGE, position: 48, from: 10, to: 80 },
+    ]);
+  });
+
+  it("refuses a guide list that is not terminated", () => {
+    const words = new Uint32Array(SNAP_ANSWER_WORDS);
+    words[2] = 1;
+    words[3 + GUIDE_WORDS] = 0xdeadbeef;
+    expect(() => decodeSnapResult(words)).toThrow(RangeError);
+  });
+
+  it("never reads more guides than the module can write", () => {
+    const words = new Uint32Array(SNAP_ANSWER_WORDS);
+    words[2] = MAX_SNAP_GUIDES + 5; // a corrupt count
+    expect(decodeSnapResult(words).guides).toHaveLength(MAX_SNAP_GUIDES);
   });
 });
 

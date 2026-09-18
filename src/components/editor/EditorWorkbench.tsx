@@ -1,4 +1,5 @@
 import { EditorCanvas } from "./EditorCanvas";
+import { EditorPanels } from "./EditorPanels";
 import { EDITOR_ICON_LIMIT, useEditor } from "../../state/editorStore";
 
 /** One toolbar button: the editor's whole command surface. */
@@ -58,6 +59,7 @@ export function EditorWorkbench() {
   const duplicate = useEditor((s) => s.duplicate);
   const remove = useEditor((s) => s.remove);
   const apply = useEditor((s) => s.apply);
+  const snap = useEditor((s) => s.snap);
 
   const noSelection = selection.length === 0;
 
@@ -146,6 +148,8 @@ export function EditorWorkbench() {
         />
       </header>
 
+      <EditorPanels />
+
       <div className="min-h-0 flex-1">
         {status === "ready" ? (
           <EditorCanvas />
@@ -185,6 +189,10 @@ export function EditorWorkbench() {
           {loadedIcons === 1 ? "" : "s"} loaded
           {availableIcons > EDITOR_ICON_LIMIT ? ` (4A loads the first ${EDITOR_ICON_LIMIT})` : ""}
         </span>
+        <span data-testid="editor-snap-state">
+          snap {snapFilter("canvas", snap.canvas)} {snapFilter("nodes", snap.nodes)}{" "}
+          {snap.grid ? `grid ${snap.gridStep}` : snapFilter("grid", false)} · {snap.tolerance} u
+        </span>
         <span>
           history {history.undoable}/{history.redoable}
           {history.dropped > 0 ? ` · ${history.dropped} dropped` : ""}
@@ -195,6 +203,11 @@ export function EditorWorkbench() {
       </footer>
     </section>
   );
+}
+
+/** A snap family as the footer shows it: on, or struck through when off. */
+function snapFilter(name: string, on: boolean): string {
+  return on ? name : `${name}✗`;
 }
 
 /** Trims the browser's fetch noise down to the part the user needs. */
