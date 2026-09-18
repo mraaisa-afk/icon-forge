@@ -1,6 +1,7 @@
 import { Comparator } from "./Comparator";
 import { EditorGate } from "../editor/EditorGate";
 import { GroupOverlay } from "./GroupOverlay";
+import { SheetExportCard } from "./SheetExportCard";
 import { useStore } from "../../state/store";
 import { fmt } from "../../lib/compareModel";
 
@@ -48,6 +49,8 @@ export function SheetPanel() {
 
       <GroupOverlay />
 
+      <SheetExportCard />
+
       <EditorGate />
 
       <div className="px-3">
@@ -68,8 +71,8 @@ export function SheetPanel() {
       <div className="p-3">
         {icons.length === 0 ? (
           <div className="rounded border border-dashed border-forge-edge p-3 text-xs text-forge-dim">
-            No icons yet — run “Vectorize sheet”, then pick an icon below to compare it
-            against the original.
+            No icons yet — run “Vectorize sheet”, then pick an icon below to compare it against the
+            original.
           </div>
         ) : (
           <div className="grid grid-cols-4 gap-2">

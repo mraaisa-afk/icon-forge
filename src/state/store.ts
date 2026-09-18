@@ -20,6 +20,14 @@ import {
   type SensitivityDto,
   type SheetPreviewDto,
 } from "../lib/groupModel";
+import type {
+  SheetCsvDto,
+  SheetCsvPreviewDto,
+  SheetExportRequest,
+  SheetFileDto,
+  SheetPlanDto,
+  SheetPlanRequest,
+} from "../lib/sheetModel";
 
 export interface JobStatus {
   id: number;
@@ -62,6 +70,18 @@ export interface UiState {
   /** Sliders the UI is showing; the backend echoes what it actually used. */
   sensitivity: SensitivityDto | null;
 
+  // Sheet generator (§3.5) — the plan, the CSV preview and the last export.
+  /** The last plan for `selectedSheet`, or null before the wizard plans. */
+  sheetPlan: SheetPlanDto | null;
+  /** The CSV the wizard would write, as the backend re-read it. */
+  sheetCsv: SheetCsvPreviewDto | null;
+  /** The files the last export wrote, with each one's evidence. */
+  sheetFiles: SheetFileDto[] | null;
+  /** True while a sheet command is in flight. */
+  sheetGenBusy: boolean;
+  /** What the last sheet command did, shown under the wizard. */
+  sheetNote: string | null;
+
   openProject: (path: string) => Promise<void>;
   createProject: (path: string) => Promise<void>;
   closeProject: () => Promise<void>;
@@ -95,6 +115,15 @@ export interface UiState {
   loadPreview: () => Promise<void>;
   /** Clears the overlay when the sheet changes. */
   clearGrouping: () => void;
+
+  /** Plans the sheet: layout, leveling and the derived metadata. */
+  planSheet: (request: SheetPlanRequest) => Promise<void>;
+  /** Previews the CSV the wizard would write (nothing is written). */
+  previewSheetCsv: (request: SheetPlanRequest, csv: SheetCsvDto) => Promise<void>;
+  /** Writes the sheet's files into `request.outDir`. */
+  exportSheet: (request: SheetExportRequest) => Promise<void>;
+  /** Drops the plan when the wizard's controls change. */
+  clearSheetPlan: () => void;
 }
 
 function jobFromEvent(e: JobEvent): JobStatus | null {
@@ -143,6 +172,12 @@ export const useStore = create<UiState>((set, get) => ({
   groupBusy: false,
   groupNote: null,
   sensitivity: null,
+
+  sheetPlan: null,
+  sheetCsv: null,
+  sheetFiles: null,
+  sheetGenBusy: false,
+  sheetNote: null,
 
   async openProject(path) {
     set({ busy: true, error: null });
@@ -228,6 +263,10 @@ export const useStore = create<UiState>((set, get) => ({
       preview: null,
       groupNote: null,
       sensitivity: null,
+      sheetPlan: null,
+      sheetCsv: null,
+      sheetFiles: null,
+      sheetNote: null,
     });
     try {
       const icons = await backend().then((b) => b.sheetIcons(sheet.id));
@@ -248,6 +287,10 @@ export const useStore = create<UiState>((set, get) => ({
       preview: null,
       groupNote: null,
       sensitivity: null,
+      sheetPlan: null,
+      sheetCsv: null,
+      sheetFiles: null,
+      sheetNote: null,
     });
   },
 
@@ -394,7 +437,16 @@ export const useStore = create<UiState>((set, get) => ({
   },
 
   clearGrouping() {
-    set({ grouping: null, preview: null, groupNote: null, sensitivity: null });
+    set({
+      grouping: null,
+      preview: null,
+      groupNote: null,
+      sensitivity: null,
+      sheetPlan: null,
+      sheetCsv: null,
+      sheetFiles: null,
+      sheetNote: null,
+    });
   },
 
   async ensureIcon(bbox, preset) {
@@ -410,6 +462,67 @@ export const useStore = create<UiState>((set, get) => ({
     } catch (e) {
       set({ error: String(e) });
     }
+  },
+
+  async planSheet(request) {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    set({ sheetGenBusy: true, error: null, sheetNote: null });
+    try {
+      const plan = await backend().then((b) => b.sheetPlan({ ...request, sheetId: sheet.id }));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({
+        sheetPlan: plan,
+        sheetNote: `${plan.icons} icons planned · ${plan.columns}×${plan.rows} cells`,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ sheetGenBusy: false });
+    }
+  },
+
+  async previewSheetCsv(request, csv) {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    set({ sheetGenBusy: true, error: null });
+    try {
+      const preview = await backend().then((b) =>
+        b.sheetCsvPreview({ ...request, sheetId: sheet.id }, csv),
+      );
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({
+        sheetCsv: preview,
+        sheetNote: `${preview.rows.length} rows · ${preview.columns.length} columns`,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ sheetGenBusy: false });
+    }
+  },
+
+  async exportSheet(request) {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    set({ sheetGenBusy: true, error: null, sheetNote: null });
+    try {
+      const out = await backend().then((b) => b.sheetExport({ ...request, sheetId: sheet.id }));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({
+        sheetPlan: out.plan,
+        sheetFiles: out.files,
+        sheetNote: `wrote ${out.files.length} file(s) into ${request.outDir}`,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ sheetGenBusy: false });
+    }
+  },
+
+  clearSheetPlan() {
+    set({ sheetPlan: null, sheetCsv: null, sheetFiles: null, sheetNote: null });
   },
 
   startEventPump() {

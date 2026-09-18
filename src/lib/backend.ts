@@ -13,12 +13,26 @@
 /** A sheet-space box, as the commands take it (readonly: the UI's `Bbox`). */
 export type Box4 = readonly [number, number, number, number];
 
-import type {
-  GroupingDto,
-  SensitivityDto,
-  SheetPreviewDto,
-  SplitHereDto,
-} from "./groupModel";
+import type { GroupingDto, SensitivityDto, SheetPreviewDto, SplitHereDto } from "./groupModel";
+import {
+  clampSpec,
+  cv,
+  DEFAULT_CSV,
+  DEFAULT_NAME_PATTERN,
+  expandPattern,
+  slugify,
+  solveGrid,
+  targetInk,
+  type SheetCsvDto,
+  type SheetCsvPreviewDto,
+  type SheetExportDto,
+  type SheetExportRequest,
+  type SheetFileDto,
+  type SheetPlanDto,
+  type SheetPlanRequest,
+  type SheetPlacementDto,
+  type SheetReportDto,
+} from "./sheetModel";
 
 export interface ProjectInfo {
   path: string;
@@ -73,7 +87,12 @@ export interface IconSvgDto {
 export type JobEvent =
   | { kind: "started"; id: number; name: string }
   | { kind: "progress"; id: number; done: number; total: number; message: string }
-  | { kind: "finished"; id: number; outcome: "succeeded" | "cancelled" | "preempted" | "failed"; message?: string };
+  | {
+      kind: "finished";
+      id: number;
+      outcome: "succeeded" | "cancelled" | "preempted" | "failed";
+      message?: string;
+    };
 
 type Listener = (e: JobEvent) => void;
 
@@ -112,6 +131,12 @@ interface Backend {
   groupSelected(sheetId: string, boxes: readonly Box4[]): Promise<GroupingDto>;
   /** Downscaled PNG of the normalized sheet — the overlay backdrop. */
   sheetPreview(sheetId: string, maxDim: number): Promise<SheetPreviewDto>;
+  /** Plans a sheet (§3.5 layout + leveling + the derived metadata). */
+  sheetPlan(request: SheetPlanRequest): Promise<SheetPlanDto>;
+  /** The CSV the wizard would write, without writing anything. */
+  sheetCsvPreview(request: SheetPlanRequest, csv: SheetCsvDto): Promise<SheetCsvPreviewDto>;
+  /** Writes the sheet's files and reports the second reader each one passed. */
+  sheetExport(request: SheetExportRequest): Promise<SheetExportDto>;
 }
 
 // ---- Tauri backend -------------------------------------------------------
@@ -175,6 +200,15 @@ async function tauriBackend(): Promise<Backend> {
     async sheetPreview(sheetId, maxDim) {
       return invoke<SheetPreviewDto>("sheet_preview", { sheetId, maxDim });
     },
+    async sheetPlan(request) {
+      return invoke<SheetPlanDto>("sheet_plan", { req: request });
+    },
+    async sheetCsvPreview(request, csv) {
+      return invoke<SheetCsvPreviewDto>("sheet_csv_preview", { req: request, csv });
+    },
+    async sheetExport(request) {
+      return invoke<SheetExportDto>("sheet_export", { req: request });
+    },
   };
 }
 
@@ -199,6 +233,101 @@ const MOCK_RANGES: Record<keyof SensitivityDto, [number, number]> = {
   noiseMinArea: [0, 512],
   gridRegularityMin: [0, 1],
 };
+
+/**
+ * A deterministic 0..1 stream — the browser mock must produce the *same*
+ * numbers twice, or a wizard preview would drift on every keystroke.
+ */
+function mockRandoms(seed: number): () => number {
+  let state = seed >>> 0 || 1;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+/** RFC 4180 field quoting, the rule `write_csv` uses. */
+function mockField(value: string, delimiter: string): string {
+  if (value.includes(delimiter) || value.includes('"') || value.includes("\n")) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/**
+ * The mock's synthetic plan: the real layout arithmetic over a plausible
+ * spread of ink sizes, so the panel can be developed and tested in a browser
+ * without the native sheet generator.
+ */
+function mockPlan(request: SheetPlanRequest, count: number): SheetPlanDto {
+  const spec = clampSpec(request.spec);
+  const grid = solveGrid(spec, count);
+  const target = targetInk(spec);
+  const rand = mockRandoms(count * 2654435761 + spec.cell);
+  const stem = request.sheetStem?.trim() || "sheet";
+  const placements: SheetPlacementDto[] = [];
+  const inks: number[] = [];
+  const strokes: number[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const index = i + 1;
+    const row = Math.floor(i / grid.columns) + 1;
+    const col = (i % grid.columns) + 1;
+    // ±3 % of ink size (cv ≈ 0.017), and a stroke spread of ±6 %.
+    const ink = target * (0.97 + 0.06 * rand());
+    inks.push(ink);
+    strokes.push(target * 0.1 * (0.94 + 0.12 * rand()));
+    const cellX = spec.margin + (i % grid.columns) * (spec.cell + spec.gap);
+    const cellY = spec.margin + Math.floor(i / grid.columns) * (spec.cell + spec.gap);
+    const name = expandPattern(request.namePattern || DEFAULT_NAME_PATTERN, {
+      sheet: stem,
+      index,
+      row,
+      col,
+      preset: request.preset,
+    });
+    const slug = slugify(name);
+    // Ink is square in the mock; the real one measures the icon's own box.
+    placements.push({
+      id: index,
+      index,
+      row,
+      col,
+      cellX,
+      cellY,
+      x: cellX + (spec.cell - ink) / 2,
+      y: cellY + (spec.cell - ink) / 2,
+      w: ink,
+      h: ink,
+      scale: ink / target,
+      flags: [],
+      name,
+      slug,
+      file: `svg/${slug}.svg`,
+    });
+  }
+  const report: SheetReportDto = {
+    inkSizeCv: cv(inks),
+    strokeCv: cv(strokes),
+    baselineSpread: 0,
+    medianStroke: [...strokes].sort((a, b) => a - b)[Math.floor(strokes.length / 2)] ?? 0,
+    medianSolidity: 0.985,
+    overflowBackoffs: 0,
+    strokeClamped: 0,
+    solidityClamped: 0,
+  };
+  return {
+    width: grid.width,
+    height: grid.height,
+    columns: grid.columns,
+    rows: grid.rows,
+    icons: count,
+    cell: spec.cell,
+    inkRatio: spec.inkRatio,
+    placement: spec.placement,
+    report,
+    placements,
+  };
+}
 
 class MockBackend implements Backend {
   private sheets: SheetDto[] = [];
@@ -262,7 +391,12 @@ class MockBackend implements Backend {
         await new Promise((r) => setTimeout(r, 120));
         this.emit({ kind: "progress", id, done: i * 20, total: 100, message: "importing (mock)" });
       }
-      this.emit({ kind: "finished", id, outcome: "succeeded", message: `mock import from ${root}` });
+      this.emit({
+        kind: "finished",
+        id,
+        outcome: "succeeded",
+        message: `mock import from ${root}`,
+      });
     })();
     return id;
   }
@@ -287,7 +421,13 @@ class MockBackend implements Backend {
     return this.icons.get(_sheetId) ?? [];
   }
 
-  async sheetCrop(_sheetId: string, _x: number, _y: number, _w: number, _h: number): Promise<string> {
+  async sheetCrop(
+    _sheetId: string,
+    _x: number,
+    _y: number,
+    _w: number,
+    _h: number,
+  ): Promise<string> {
     this.require();
     return MOCK_PNG;
   }
@@ -348,7 +488,12 @@ class MockBackend implements Backend {
         await new Promise((r) => setTimeout(r, 100));
         this.emit({ kind: "progress", id, done: i, total: 4, message: "vectorizing (mock)" });
       }
-      this.emit({ kind: "finished", id, outcome: "succeeded", message: `mock vectorize · ${preset}` });
+      this.emit({
+        kind: "finished",
+        id,
+        outcome: "succeeded",
+        message: `mock vectorize · ${preset}`,
+      });
     })();
     return id;
   }
@@ -416,8 +561,14 @@ class MockBackend implements Backend {
         gridY: true,
         cellsX: 4,
         cellsY: 3,
-        valleyX: Array.from({ length: 3 }, (_, i) => gapX * (i + 1) + cellW * (i + 1) - Math.round(gapX / 2)),
-        valleyY: Array.from({ length: 2 }, (_, i) => gapY * (i + 1) + cellH * (i + 1) - Math.round(gapY / 2)),
+        valleyX: Array.from(
+          { length: 3 },
+          (_, i) => gapX * (i + 1) + cellW * (i + 1) - Math.round(gapX / 2),
+        ),
+        valleyY: Array.from(
+          { length: 2 },
+          (_, i) => gapY * (i + 1) + cellH * (i + 1) - Math.round(gapY / 2),
+        ),
       },
       stats: {
         input: tiles.length,
@@ -504,16 +655,16 @@ class MockBackend implements Backend {
       groups,
       manualEdits: current.manualEdits + 1,
       maskCacheHit: true,
-      statusLine: current.statusLine.replace(/^Grouped \d+ icons/, `Grouped ${groups.length} icons`),
+      statusLine: current.statusLine.replace(
+        /^Grouped \d+ icons/,
+        `Grouped ${groups.length} icons`,
+      ),
     };
     this.grouping.set(sheetId, report);
     return { split: true, regions: 2, groupIndex: index, elapsedMs: 0.4, report };
   }
 
-  async groupSelected(
-    sheetId: string,
-    boxes: readonly Box4[],
-  ): Promise<GroupingDto> {
+  async groupSelected(sheetId: string, boxes: readonly Box4[]): Promise<GroupingDto> {
     this.require();
     const current = this.current(sheetId);
     const hits = current.groups
@@ -542,7 +693,10 @@ class MockBackend implements Backend {
       groups,
       manualEdits: current.manualEdits + 1,
       maskCacheHit: true,
-      statusLine: current.statusLine.replace(/^Grouped \d+ icons/, `Grouped ${groups.length} icons`),
+      statusLine: current.statusLine.replace(
+        /^Grouped \d+ icons/,
+        `Grouped ${groups.length} icons`,
+      ),
     };
     this.grouping.set(sheetId, report);
     return report;
@@ -567,6 +721,88 @@ class MockBackend implements Backend {
     };
     this.previews.set(cacheKey, preview);
     return preview;
+  }
+
+  /** How many icons the mock plans for a sheet: what Group All found, else a grid. */
+  private mockCount(sheetId: string): number {
+    return this.grouping.get(sheetId)?.groups.length ?? 16;
+  }
+
+  async sheetPlan(request: SheetPlanRequest): Promise<SheetPlanDto> {
+    this.require();
+    return mockPlan(request, this.mockCount(request.sheetId));
+  }
+
+  async sheetCsvPreview(request: SheetPlanRequest, csv: SheetCsvDto): Promise<SheetCsvPreviewDto> {
+    this.require();
+    const plan = mockPlan(request, this.mockCount(request.sheetId));
+    const options = { ...DEFAULT_CSV, ...csv };
+    const columns = options.columns.filter((c) => c.length > 0);
+    const rows = plan.placements.map((p) => {
+      const values: Record<string, string> = {
+        index: String(p.index),
+        name: p.name,
+        slug: p.slug,
+        tags: request.preset,
+        file: p.file,
+        row: String(p.row),
+        col: String(p.col),
+        width: String(Math.round(p.w)),
+        height: String(Math.round(p.h)),
+        ink: p.w.toFixed(2),
+        stroke: plan.report.medianStroke.toFixed(2),
+        solidity: plan.report.medianSolidity.toFixed(3),
+        area: String(Math.round(p.w * p.h)),
+        preset: request.preset,
+        colours: "1",
+        id: p.id.toString(16).padStart(8, "0"),
+      };
+      return columns.map((c) => values[c] ?? "");
+    });
+    const lines = rows.map((r) =>
+      r.map((v) => mockField(v, options.delimiter)).join(options.delimiter),
+    );
+    const text = [...(options.header ? [columns.join(options.delimiter)] : []), ...lines].join(
+      "\r\n",
+    );
+    return { columns: [...columns], rows, text: `${text}\r\n` };
+  }
+
+  async sheetExport(request: SheetExportRequest): Promise<SheetExportDto> {
+    this.require();
+    const count = this.mockCount(request.sheetId);
+    const plan = mockPlan(request, count);
+    const stem = request.sheetStem?.trim() || "sheet";
+    const formats = request.formats.length > 0 ? request.formats : ["svg", "pdf", "png", "csv"];
+    const dir = request.outDir.replace(/[\\/]+$/, "");
+    const files: SheetFileDto[] = [];
+    for (const format of formats) {
+      const paths: Record<string, string> = {
+        svg: `${dir}/${stem}-sheet.svg`,
+        pdf: `${dir}/${stem}-sheet.pdf`,
+        png: `${dir}/${stem}-sheet.png`,
+        csv: `${dir}/${stem}-icons.csv`,
+        icons: `${dir}/svg`,
+      };
+      if (!(format in paths)) throw new Error(`unknown export format: ${format}`);
+      // Plausible sizes: ~180 B per placed icon for the vector files, four
+      // bytes per pixel for the raster, and one CSV line each.
+      const bytes =
+        format === "icons"
+          ? 0
+          : format === "png"
+            ? plan.width * plan.height * 4
+            : format === "csv"
+              ? count * 96
+              : count * 180;
+      files.push({
+        format,
+        path: paths[format],
+        bytes,
+        evidence: `mock: ${format} written for ${count} icons (no native sheet generator in the browser)`,
+      });
+    }
+    return { plan, files };
   }
 
   async onJobEvent(listener: Listener): Promise<() => void> {
