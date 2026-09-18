@@ -29,6 +29,31 @@ impl NodeId {
     }
 }
 
+/// Stable identity of an editor **group** (4B).
+///
+/// A group is what makes several nodes behave like one object: picking any
+/// member selects all of them, and a transform applies to the whole set. Groups
+/// are deliberately **flat** in 4B (a group cannot contain another group) and
+/// live on the nodes rather than in a separate table, so the document stays a
+/// flat z-ordered list and every existing z operation keeps working unchanged.
+/// Like [`NodeId`], a group id is never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GroupId(u32);
+
+impl GroupId {
+    /// Wraps a raw id (the WASM wire format and tests use raw numbers).
+    #[must_use]
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The raw id.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// One editable layer: geometry in local coordinates plus its placement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
@@ -42,6 +67,8 @@ pub struct Node {
     pub fill: [u8; 4],
     /// Hidden nodes still exist and can be re-shown with an exact undo.
     pub visible: bool,
+    /// The group this node belongs to, if any (see [`GroupId`]).
+    pub group: Option<GroupId>,
 }
 
 impl Node {
@@ -54,6 +81,7 @@ impl Node {
             transform: Affine::IDENTITY,
             fill,
             visible: true,
+            group: None,
         }
     }
 
@@ -84,6 +112,13 @@ impl Node {
     /// of the reported box.
     #[must_use]
     pub fn bounds(&self) -> Option<(Point, Point)> {
+        self.bounds_with(self.transform)
+    }
+
+    /// The bounding box the node would have under `transform` instead of its
+    /// stored one — what a live drag preview asks for.
+    #[must_use]
+    pub fn bounds_with(&self, transform: Affine) -> Option<(Point, Point)> {
         let mut min = Point::new(f32::INFINITY, f32::INFINITY);
         let mut max = Point::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
         let mut any = false;
@@ -92,7 +127,7 @@ impl Node {
                 continue;
             };
             for p in [lo, Point::new(hi.x, lo.y), hi, Point::new(lo.x, hi.y)] {
-                let (x, y) = self.transform.apply(p.x, p.y);
+                let (x, y) = transform.apply(p.x, p.y);
                 min.x = min.x.min(x);
                 min.y = min.y.min(y);
                 max.x = max.x.max(x);
@@ -111,7 +146,13 @@ impl Node {
     /// every zoom level and after every scale command.
     #[must_use]
     pub fn contains(&self, x: f32, y: f32, tolerance: f32) -> bool {
-        let inv = match self.transform.invert() {
+        self.contains_with(self.transform, x, y, tolerance)
+    }
+
+    /// [`Node::contains`] under an overriding transform (the live preview).
+    #[must_use]
+    pub fn contains_with(&self, transform: Affine, x: f32, y: f32, tolerance: f32) -> bool {
+        let inv = match transform.invert() {
             Some(inv) => inv,
             None => return false,
         };
@@ -145,6 +186,7 @@ pub struct Doc {
     height: f32,
     nodes: Vec<Node>,
     next_id: u32,
+    next_group: u32,
 }
 
 impl Doc {
@@ -156,6 +198,7 @@ impl Doc {
             height,
             nodes: Vec::new(),
             next_id: 1,
+            next_group: 1,
         }
     }
 
@@ -222,6 +265,59 @@ impl Doc {
     /// Restores the id counter (used by the undo of an insert).
     pub fn set_next_id(&mut self, next: u32) {
         self.next_id = next;
+    }
+
+    /// The group a node belongs to.
+    #[must_use]
+    pub fn group_of(&self, id: NodeId) -> Option<GroupId> {
+        self.node(id).and_then(|n| n.group)
+    }
+
+    /// Every member of a group, in z order (bottom first).
+    #[must_use]
+    pub fn members(&self, group: GroupId) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|n| n.group == Some(group))
+            .map(|n| n.id)
+            .collect()
+    }
+
+    /// How many distinct groups the document contains.
+    #[must_use]
+    pub fn group_count(&self) -> usize {
+        let mut groups: Vec<GroupId> = self.nodes.iter().filter_map(|n| n.group).collect();
+        groups.sort_unstable();
+        groups.dedup();
+        groups.len()
+    }
+
+    /// The id the next group will be minted with (see [`Doc::note_group`]).
+    #[must_use]
+    pub fn next_group(&self) -> u32 {
+        self.next_group
+    }
+
+    /// Mints a fresh group id.
+    pub fn alloc_group(&mut self) -> GroupId {
+        let id = GroupId::new(self.next_group);
+        self.note_group(id);
+        id
+    }
+
+    /// Raises the group counter so `group` can never be minted twice — the
+    /// [`Doc::insert_at`] rule for ids, applied to groups.
+    pub fn note_group(&mut self, group: GroupId) {
+        self.next_group = self.next_group.max(group.get().saturating_add(1));
+    }
+
+    /// The ids a click on `id` should select: its whole group, or just itself.
+    #[must_use]
+    pub fn selection_target(&self, id: NodeId) -> Vec<NodeId> {
+        match self.group_of(id) {
+            Some(group) => self.members(group),
+            None => vec![id],
+        }
     }
 
     /// Appends a node on top of the stack.

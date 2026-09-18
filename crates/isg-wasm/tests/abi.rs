@@ -9,11 +9,14 @@
 
 use isg_wasm::abi::{
     self, feature, Abi, ABI_VERSION, DOC_HEADER, ERR_BAD_ARGUMENT, ERR_BAD_FEATURE, ERR_DEGENERATE,
-    ERR_MISSING_NODE, ERR_NO_DOCUMENT, ERR_NO_HISTORY, ERR_NO_OP, ERR_NO_SELECTION,
+    ERR_MISSING_NODE, ERR_NONE, ERR_NO_DOCUMENT, ERR_NO_HISTORY, ERR_NO_OP, ERR_NO_SELECTION,
     ERR_TRANSPARENT, IN_WORDS, MAX_FEATURE, MAX_NODES, NODE_RECORD_HEADER, OUT_WORDS,
 };
 use isg_wasm::doc_blob::{decode_doc, decode_path, encode_doc, encode_path};
-use isg_wasm::editor::{Affine, Command, Doc, Node, NodeId, Point, Seg, Subpath};
+use isg_wasm::editor::{
+    Affine, AlignEdge, AlignFrame, ArrangeTo, Command, Doc, GroupId, Node, NodeId, Point, Seg,
+    Subpath,
+};
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -145,7 +148,8 @@ impl Harness {
                 *slot = f32::from_bits(self.out[at + 1 + i]);
             }
             let fill_word = self.out[at + 7];
-            let path_words = self.out[at + 9] as usize;
+            let group_word = self.out[at + 9];
+            let path_words = self.out[at + 10] as usize;
             let mut consumed = 0;
             let path = decode_path(&self.out[at + NODE_RECORD_HEADER..], 0, &mut consumed)
                 .expect("record path decodes");
@@ -162,6 +166,7 @@ impl Harness {
             );
             node.transform = Affine::new(m);
             node.visible = self.out[at + 8] != 0;
+            node.group = (group_word != 0).then(|| GroupId::new(group_word));
             nodes.push(node);
             at += NODE_RECORD_HEADER + path_words;
         }
@@ -240,7 +245,9 @@ fn malformed_blobs_are_rejected_not_panicked() {
     // A node whose declared path length disagrees with the words present.
     let mut inconsistent = full.clone();
     let per_node = NODE_RECORD_HEADER + encode_path(&doc.nodes()[0].path).len();
-    inconsistent[DOC_HEADER + 9] += 7;
+    // The length word is the last one in the node header (a group word landed
+    // ahead of it in 4B), so the corruption is addressed by the header size.
+    inconsistent[DOC_HEADER + NODE_RECORD_HEADER - 1] += 7;
     assert_eq!(decode_doc(&inconsistent), Err(ERR_BAD_ARGUMENT));
     assert!(per_node > NODE_RECORD_HEADER);
     // An unknown segment kind inside an otherwise valid blob.
@@ -597,6 +604,292 @@ fn the_node_cap_is_enforced() {
 }
 
 // ---------------------------------------------------------------------------
+// 4B: groups, arrange/align/resize, preview and snap (ABI v2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_ids_travel_in_the_node_records() {
+    let mut h = Harness::new();
+    h.load(&fixture_doc());
+    assert_eq!(h.call(feature::SELECT_ALL, 0, 0), 3);
+    assert_eq!(h.apply(&Command::Group), 3);
+
+    let nodes = h.synced_nodes();
+    assert_eq!(nodes.len(), 3);
+    let group = nodes[0].group.expect("membership is in the record");
+    assert!(nodes.iter().all(|n| n.group == Some(group)));
+    // The group word sits ahead of the path length, so a host that walks records
+    // and reads membership never needs a second call.
+    assert_eq!(h.out[9], group.get());
+
+    // Selecting one member through the wire selects the whole group.
+    assert_eq!(h.call(feature::SELECT_CLEAR, 0, 0), 0);
+    assert_eq!(h.call(feature::SELECT_ONLY, nodes[1].id.get(), 0), 3);
+    assert_eq!(h.call(feature::SELECTION_IDS, 0, 0), 3);
+    assert_eq!(h.out[..4], [1, 2, 3, 0]);
+
+    assert_eq!(h.apply(&Command::Ungroup), 3);
+    assert!(h.synced_nodes().iter().all(|n| n.group.is_none()));
+    h.call(feature::UNDO, 0, 0);
+    assert!(h.synced_nodes().iter().all(|n| n.group == Some(group)));
+    assert!(h.out[9] > 0, "the restored record carries a group word");
+    eprintln!(
+        "evidence: editor groups — 3 nodes grouped through the ABI, membership in \
+         the node record, ungroup and undo exact"
+    );
+}
+
+#[test]
+fn the_new_commands_apply_through_their_specs() {
+    let mut h = Harness::new();
+    h.load(&fixture_doc());
+    let ids: Vec<u32> = h
+        .abi
+        .editor()
+        .doc()
+        .map(|d| d.ids().iter().map(|i| i.get()).collect())
+        .unwrap();
+    h.call(feature::SELECT_ONLY, ids[0], 0);
+
+    let before = h.view();
+    assert!(
+        h.apply(&Command::ScaleXY {
+            sx: 2.0,
+            sy: 0.5,
+            pivot: (10.0, 10.0)
+        }) > 0
+    );
+    h.call(feature::UNDO, 0, 0);
+    assert_eq!(h.view(), before, "resize undoes exactly");
+    assert!(h.call(feature::REDO, 0, 0) > 0);
+
+    h.call(feature::SELECT_ALL, 0, 0);
+    assert!(
+        h.apply(&Command::Align {
+            frame: AlignFrame::Canvas,
+            edge: AlignEdge::Left
+        }) > 0
+    );
+    let lefts: Vec<f32> = (0..3)
+        .map(|i| {
+            let id = h.call(feature::NODE_AT, i, 0);
+            h.call(feature::NODE_BOUNDS, id, 0);
+            h.out_f32(0)
+        })
+        .collect();
+    assert!(lefts.iter().all(|x| *x == 0.0), "lefts {lefts:?}");
+    h.call(feature::UNDO, 0, 0);
+
+    // Arrange with the *bottom* node selected, so the order really has to change.
+    h.call(feature::SELECT_ONLY, ids[0], 0);
+    let order_before: Vec<u32> = (0..3).map(|i| h.call(feature::NODE_AT, i, 0)).collect();
+    assert!(
+        h.apply(&Command::Arrange {
+            to: ArrangeTo::Front
+        }) > 0
+    );
+    let order_after: Vec<u32> = (0..3).map(|i| h.call(feature::NODE_AT, i, 0)).collect();
+    assert_ne!(order_before, order_after);
+    assert_eq!(
+        order_after[2], ids[0],
+        "the selected node came to the front"
+    );
+    h.call(feature::UNDO, 0, 0);
+    let order_restored: Vec<u32> = (0..3).map(|i| h.call(feature::NODE_AT, i, 0)).collect();
+    assert_eq!(order_restored, order_before);
+}
+
+#[test]
+fn malformed_new_command_specs_are_refused_not_guessed() {
+    let mut h = Harness::new();
+    h.load(&fixture_doc());
+    h.call(feature::SELECT_ALL, 0, 0);
+    h.put(&[abi::OP_ALIGN, 1, 9], 0);
+    assert_eq!(h.call(feature::APPLY_SPEC, 0, 0), 0);
+    assert_eq!(h.error(), ERR_BAD_ARGUMENT);
+    h.put(&[abi::OP_ARRANGE, 7], 0);
+    assert_eq!(h.call(feature::APPLY_SPEC, 0, 0), 0);
+    assert_eq!(h.error(), ERR_BAD_ARGUMENT);
+    h.put(
+        &[abi::OP_SCALE_XY, 1.0f32.to_bits(), 0.0f32.to_bits(), 0, 0],
+        0,
+    );
+    assert_eq!(h.call(feature::APPLY_SPEC, 0, 0), 0);
+    assert_eq!(h.error(), ERR_DEGENERATE);
+    // …while every alignment edge the UI can ask for is addressable. With one
+    // node selected, aligning to the selection's own box is a no-op by
+    // construction, which is a clean way to prove each opcode reaches the engine.
+    h.call(feature::SELECT_ONLY, 1, 0);
+    for edge in AlignEdge::ALL {
+        let spec = abi::encode_command(&Command::Align {
+            frame: AlignFrame::Selection,
+            edge,
+        });
+        h.put(&spec, 0);
+        assert_eq!(
+            h.call(feature::APPLY_SPEC, 0, 0),
+            0,
+            "a single node cannot align to itself (edge {edge:?})"
+        );
+        assert_eq!(h.error(), ERR_NO_OP);
+    }
+}
+
+#[test]
+fn a_preview_moves_the_synced_geometry_without_touching_the_history() {
+    let mut h = Harness::new();
+    h.load(&fixture_doc());
+    h.call(feature::SELECT_ONLY, 1, 0);
+    let before = h.view();
+
+    let spec = abi::encode_command(&Command::Translate { dx: 25.0, dy: -5.0 });
+    h.put(&spec, 0);
+    assert_eq!(h.call(feature::PREVIEW, abi::PREVIEW_SET, 0), 1);
+    let previewed = h.synced_nodes();
+    assert_ne!(previewed[0].transform, before.0[0].transform);
+    assert_eq!(
+        h.abi.editor().doc().unwrap().nodes()[0].transform,
+        before.0[0].transform,
+        "the stored document is untouched"
+    );
+    assert_eq!(h.call(feature::CAN_UNDO, 0, 0), 0);
+    h.call(feature::SELECTION_BOUNDS, 0, 0);
+    let preview_lo = h.out_f32(0);
+
+    assert_eq!(h.call(feature::PREVIEW, abi::PREVIEW_CLEAR, 0), 0);
+    assert_eq!(h.synced_nodes()[0].transform, before.0[0].transform);
+    h.call(feature::SELECTION_BOUNDS, 0, 0);
+    assert_ne!(h.out_f32(0), preview_lo);
+
+    // Committing is an ordinary APPLY of the same spec: the geometry matches
+    // what was on screen, and it is exactly one history step.
+    h.put(&spec, 0);
+    h.call(feature::PREVIEW, abi::PREVIEW_SET, 0);
+    h.put(&spec, 0);
+    assert!(h.call(feature::APPLY_SPEC, 0, 0) > 0);
+    assert_eq!(h.synced_nodes()[0].transform, previewed[0].transform);
+    assert_eq!(h.call(feature::CAN_UNDO, 0, 0), 1);
+    assert_eq!(h.call(feature::HISTORY_LEN, 0, 0), 1);
+    eprintln!(
+        "evidence: editor preview — 1 node previewed with no history step, then \
+         committed to identical geometry"
+    );
+}
+
+#[test]
+fn snap_returns_a_corrected_delta_its_guides_and_a_terminator() {
+    let mut h = Harness::new();
+    h.load(&fixture_doc());
+    h.call(feature::SELECT_ONLY, 3, 0);
+    h.call(feature::NODE_BOUNDS, 3, 0);
+    let lo_x = h.out_f32(0);
+    // Ask to move the node so its left edge lands 2 units short of the canvas
+    // centre line (the document is 200 wide, so that line is x = 100).
+    let dx = 100.0 - lo_x - 2.0;
+    let words = [
+        dx.to_bits(),
+        0.0f32.to_bits(),
+        6.0f32.to_bits(),
+        abi::SNAP_CANVAS | abi::SNAP_NODES,
+        0.0f32.to_bits(),
+    ];
+    h.put(&words, 0);
+    let guides = h.call(feature::SNAP, 0, 0);
+    assert!(guides >= 1, "at least the corrected axis is explained");
+    assert_eq!(h.out_f32(0), dx + 2.0, "the delta is corrected by 2 units");
+    assert_eq!(h.out_f32(1), 0.0);
+    assert_eq!(h.out[2], guides);
+    // Every guide record is inside the documented ranges…
+    for i in 0..guides as usize {
+        let at = 3 + i * abi::GUIDE_WORDS;
+        assert!(h.out[at] <= 1, "axis is 0 or 1");
+        assert!(h.out[at + 1] <= 4, "guide kind is 0..=4");
+    }
+    // …and the list is terminated, so a host can walk it without the count.
+    assert_eq!(h.out[3 + guides as usize * abi::GUIDE_WORDS], 0);
+
+    // Nothing in reach: the proposed delta passes through, and no guide record
+    // is left over from the previous call.
+    let words = [
+        7.5f32.to_bits(),
+        33.25f32.to_bits(),
+        1.0f32.to_bits(),
+        abi::SNAP_CANVAS | abi::SNAP_NODES,
+        0.0f32.to_bits(),
+    ];
+    h.put(&words, 0);
+    assert_eq!(h.call(feature::SNAP, 0, 0), 0);
+    assert_eq!(h.out_f32(0), 7.5);
+    assert_eq!(h.out_f32(1), 33.25);
+    assert_eq!(h.out[3], 0, "a stale guide record was left behind");
+
+    // The grid family is addressable, and a malformed request is refused.
+    let words = [
+        7.0f32.to_bits(),
+        0.0f32.to_bits(),
+        6.0f32.to_bits(),
+        abi::SNAP_GRID,
+        8.0f32.to_bits(),
+    ];
+    h.put(&words, 0);
+    let grid_guides = h.call(feature::SNAP, 0, 0);
+    assert!(grid_guides >= 1);
+    assert_eq!(h.out_f32(0), 8.0, "7 snaps onto the 8-unit grid");
+    // The guide that explains it is the grid one, at x = 8.
+    assert!((0..grid_guides as usize).any(|i| {
+        let at = 3 + i * abi::GUIDE_WORDS;
+        h.out[at] == 0 && h.out[at + 1] == 4 && h.out_f32(at + 2) == 8.0
+    }));
+    assert_eq!(h.out[3 + grid_guides as usize * abi::GUIDE_WORDS], 0);
+    // No family selected is "snapping off", not a malformed request: the delta
+    // comes back exactly as proposed, with nothing to draw.
+    h.put(
+        &[
+            7.0f32.to_bits(),
+            1.0f32.to_bits(),
+            6.0f32.to_bits(),
+            0,
+            8.0f32.to_bits(),
+        ],
+        0,
+    );
+    assert_eq!(h.call(feature::SNAP, 0, 0), 0);
+    assert_eq!(h.out_f32(0), 7.0);
+    assert_eq!(h.out_f32(1), 1.0);
+    assert_eq!(h.error(), ERR_NONE);
+    // A flag bit the ABI does not define is refused instead of being guessed at…
+    h.put(
+        &[
+            7.0f32.to_bits(),
+            0.0f32.to_bits(),
+            6.0f32.to_bits(),
+            abi::SNAP_FLAGS + 1,
+            8.0f32.to_bits(),
+        ],
+        0,
+    );
+    assert_eq!(h.call(feature::SNAP, 0, 0), 0);
+    assert_eq!(h.error(), ERR_BAD_ARGUMENT);
+    // …and so is a tolerance that is not a number.
+    h.put(
+        &[
+            7.0f32.to_bits(),
+            0.0f32.to_bits(),
+            f32::NAN.to_bits(),
+            abi::SNAP_CANVAS,
+            0.0f32.to_bits(),
+        ],
+        0,
+    );
+    assert_eq!(h.call(feature::SNAP, 0, 0), 0);
+    assert_eq!(h.error(), ERR_DEGENERATE);
+    eprintln!(
+        "evidence: editor snap — delta corrected and guided (list terminated), \
+         grid family live, malformed request refused"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // the exit criterion: undo(do(x)) == x
 // ---------------------------------------------------------------------------
 
@@ -644,7 +937,7 @@ fn random_walk(h: &mut Harness, rng: &mut Rng, iterations: u32) -> u32 {
             );
         }
 
-        let command = match rng.below(10) {
+        let command = match rng.below(15) {
             0 => Command::Translate {
                 dx: rng.unit() * 20.0 - 10.0,
                 dy: rng.unit() * 20.0 - 10.0,
@@ -677,6 +970,30 @@ fn random_walk(h: &mut Harness, rng: &mut Rng, iterations: u32) -> u32 {
             },
             7 => Command::Delete,
             8 => Command::CenterOnCanvas,
+            // The 4B commands join the walk, so the Phase 4 exit criterion keeps
+            // covering the newest geometry as well as the original set.
+            9 => Command::ScaleXY {
+                sx: 0.25 + rng.unit() * 3.0,
+                sy: 0.25 + rng.unit() * 3.0,
+                pivot: (rng.unit() * 200.0, rng.unit() * 120.0),
+            },
+            10 => Command::Arrange {
+                to: if rng.below(2) == 1 {
+                    ArrangeTo::Front
+                } else {
+                    ArrangeTo::Back
+                },
+            },
+            11 => Command::Align {
+                frame: if rng.below(2) == 1 {
+                    AlignFrame::Canvas
+                } else {
+                    AlignFrame::Selection
+                },
+                edge: AlignEdge::ALL[rng.below(6) as usize],
+            },
+            12 => Command::Group,
+            13 => Command::Ungroup,
             _ => Command::Translate { dx: 3.0, dy: -2.0 },
         };
 

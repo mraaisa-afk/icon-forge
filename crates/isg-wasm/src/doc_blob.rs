@@ -31,7 +31,7 @@
 //! A line stores its end point in all three point slots, so a path round-trips
 //! bit-for-bit regardless of how the geometry was authored.
 
-use isg_core::editor::{Affine, Doc, Node, NodeId, Point, Seg, Subpath};
+use isg_core::editor::{Affine, Doc, GroupId, Node, NodeId, Point, Seg, Subpath};
 
 use crate::abi::ERR_BAD_ARGUMENT;
 
@@ -39,9 +39,13 @@ use crate::abi::ERR_BAD_ARGUMENT;
 pub const SEG_WORDS: usize = 7;
 /// Words per subpath header (start + closed + segment count).
 pub const SUBPATH_HEADER_WORDS: usize = 4;
-/// Words per node header (id, six transform entries, fill, flags, path length)
-/// — the path blob follows it.
-pub const NODE_HEADER_WORDS: usize = 10;
+/// Words per node header (id, six transform entries, fill, visible, group,
+/// path length) — the path blob follows it.
+///
+/// The group word was added by 4B (ABI v2) ahead of the length word so the
+/// record stays self-describing: a host walks records with the length and reads
+/// the membership without a second call.
+pub const NODE_HEADER_WORDS: usize = 11;
 /// Words in the document header.
 pub const DOC_HEADER_WORDS: usize = 4;
 /// Segment kind: a straight line.
@@ -159,6 +163,7 @@ pub fn encode_doc(doc: &Doc) -> Vec<u32> {
                 | u32::from(node.fill[3]),
         );
         out.push(u32::from(node.visible));
+        out.push(node.group.map_or(0, |group| group.get()));
         out.push(path.len() as u32);
         out.extend_from_slice(&path);
     }
@@ -204,7 +209,11 @@ pub fn decode_doc(words: &[u32]) -> Result<Doc, u32> {
             fill_word as u8,
         ];
         let visible = words[cursor + 8] != 0;
-        let path_words = words[cursor + 9] as usize;
+        let group = match words[cursor + 9] {
+            0 => None,
+            raw => Some(GroupId::new(raw)),
+        };
+        let path_words = words[cursor + 10] as usize;
         cursor += NODE_HEADER_WORDS;
         let mut consumed = 0;
         let path = decode_path(words, cursor, &mut consumed)?;
@@ -217,6 +226,10 @@ pub fn decode_doc(words: &[u32]) -> Result<Doc, u32> {
         let mut node = Node::new(id, path, fill);
         node.transform = Affine::new(m);
         node.visible = visible;
+        node.group = group;
+        if let Some(group) = group {
+            doc.note_group(group);
+        }
         doc.insert_at(doc.node_count(), node);
     }
     Ok(doc)
@@ -237,7 +250,8 @@ pub fn write_node_record(out: &mut [u32], node: &Node) -> Option<usize> {
         | (u32::from(node.fill[2]) << 8)
         | u32::from(node.fill[3]);
     out[8] = u32::from(node.visible);
-    out[9] = path.len() as u32;
+    out[9] = node.group.map_or(0, |group| group.get());
+    out[10] = path.len() as u32;
     out[NODE_HEADER_WORDS..NODE_HEADER_WORDS + path.len()].copy_from_slice(&path);
     Some(NODE_HEADER_WORDS + path.len())
 }

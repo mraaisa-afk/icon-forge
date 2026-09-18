@@ -33,12 +33,30 @@ const F = {
   REDO: 22,
   CAN_UNDO: 23,
   HISTORY_LEN: 25,
+  NODE_AT: 35,
   ERROR: 32,
   SEGMENT_COUNT: 34,
   CLOSE: 36,
+  SNAP: 37,
+  PREVIEW: 38,
 };
 
-const OP = { TRANSLATE: 1, SCALE: 2, SET_FILL: 5, VISIBLE: 6, DELETE: 9 };
+const OP = {
+  TRANSLATE: 1,
+  SCALE: 2,
+  SET_FILL: 5,
+  VISIBLE: 6,
+  DELETE: 9,
+  GROUP: 10,
+  UNGROUP: 11,
+  ARRANGE: 12,
+  ALIGN: 13,
+  SCALE_XY: 14,
+};
+
+// SNAP flags / PREVIEW arguments.
+const SNAP = { CANVAS: 1, NODES: 2, GRID: 4, FLAGS: 7 };
+const PREVIEW = { SET: 0, CLEAR: 1 };
 
 const failures = [];
 const check = (name, ok, detail = "") => {
@@ -76,7 +94,7 @@ check(
   Object.keys(e).join(","),
 );
 check("exports memory", e.memory instanceof WebAssembly.Memory);
-check("abi version", e.editor_abi_version() === 1);
+check("abi version", e.editor_abi_version() === 2);
 
 // Views must be rebuilt after every call: growing linear memory detaches the
 // previous buffer, and a stale view would silently read zeros.
@@ -142,6 +160,8 @@ const square = (x, y, s) => ({
     { kind: 0, c1: [x, y + s], c2: [x, y + s], to: [x, y + s] },
   ],
 });
+// Node record: id, m[6], fill, visible, group, path word count (including the
+// count word itself), then the path blob.
 const encDoc = (width, height, nodes) => {
   const w = [f2w(width), f2w(height), nodes.length, 0];
   for (const n of nodes) {
@@ -151,6 +171,7 @@ const encDoc = (width, height, nodes) => {
       ...n.m.map(f2w),
       ((n.fill[0] << 24) | (n.fill[1] << 16) | (n.fill[2] << 8) | n.fill[3]) >>> 0,
       n.visible ? 1 : 0,
+      n.group ?? 0,
       p.length,
       ...p,
     );
@@ -189,6 +210,153 @@ check("undo again", call(F.UNDO) === 4);
 check("nothing left to undo", call(F.UNDO) === 0 && error() === 5);
 check("history len", call(F.HISTORY_LEN) === 0 && call(F.CAN_UNDO) === 0);
 
+// --- 4B: preview, snap, groups, arrange/align, non-uniform scale ------------
+// A preview moves what the view reports — the node record and the selection box
+// — without touching the document or the history.
+check("select for preview", call(F.SELECT_ONLY, 2) === 1);
+call(F.NODE_BOUNDS, 2);
+const stored_bounds = out(4).map(w2f);
+put([OP.TRANSLATE, f2w(11), f2w(7)]);
+check(
+  "preview_set previews the selection",
+  call(F.PREVIEW, PREVIEW.SET) === 1 && error() === 0,
+);
+call(F.NODE_BOUNDS, 2);
+const previewed = out(4).map(w2f);
+check(
+  "node bounds follow the preview",
+  previewed.join(",") === "61,27,91,57",
+  previewed.join(","),
+);
+check(
+  "a preview is not history",
+  call(F.CAN_UNDO) === 0 && call(F.HISTORY_LEN) === 0,
+);
+call(F.SELECTION_BOUNDS);
+check(
+  "the selection box follows the preview",
+  out(4).map(w2f).join(",") === previewed.join(","),
+  out(4).map(w2f).join(","),
+);
+check("preview_clear", call(F.PREVIEW, PREVIEW.CLEAR) === 0);
+call(F.NODE_BOUNDS, 2);
+check("clearing restores the stored bounds", out(4).map(w2f).join(",") === stored_bounds.join(","));
+
+// Committing the same spec lands on exactly the geometry the preview showed.
+put([OP.TRANSLATE, f2w(11), f2w(7)]);
+check("apply the previewed spec", call(F.APPLY_SPEC) === 1);
+call(F.NODE_BOUNDS, 2);
+check(
+  "the commit matches the preview",
+  out(4).map(w2f).join(",") === previewed.join(","),
+);
+check("commit is one history step", call(F.HISTORY_LEN) === 1);
+call(F.UNDO);
+
+// Snapping: node 2 sits at x 50..80, y 20..50, so a +7,+0 nudge lands its
+// centre on the 8-unit grid in x (no correction needed) and its edge two units
+// off it in y. The answer carries both facts: the corrected delta plus one
+// guide per snapped position, and the list is terminated.
+put([f2w(7), f2w(0), f2w(6), SNAP.GRID, f2w(8)]);
+const guides = call(F.SNAP);
+const snapWords = out(3 + guides * 5 + 1);
+check(
+  "snap corrects the delta onto the grid",
+  guides === 2 &&
+    Math.abs(w2f(snapWords[0]) - 7) < 1e-3 &&
+    w2f(snapWords[1]) === -2,
+  `guides=${guides} dx=${w2f(snapWords[0])} dy=${w2f(snapWords[1])}`,
+);
+const guideRecords = [];
+for (let i = 0; i < guides; i++) {
+  const at = 3 + i * 5;
+  guideRecords.push({
+    axis: snapWords[at],
+    kind: snapWords[at + 1],
+    position: w2f(snapWords[at + 2]),
+  });
+}
+check(
+  "snap guides are typed, on the grid, and terminated",
+  guideRecords.every(
+    (g) => g.kind === 4 && g.axis <= 1 && Math.abs(g.position % 8) < 1e-3,
+  ) &&
+    guideRecords.map((g) => g.axis).join(",") === "0,1" &&
+    snapWords[3 + guides * 5] === 0,
+  guideRecords.map((g) => `${g.axis}:${g.kind}:${g.position}`).join(" "),
+);
+put([f2w(7), f2w(0), f2w(6), SNAP.FLAGS + 1, f2w(8)]);
+check("snap refuses an undefined flag bit", call(F.SNAP) === 0 && error() === 3);
+
+// Groups: a group id travels in the node record, and ungrouping clears it.
+call(F.SELECT_ALL);
+put([OP.GROUP]);
+check("group", call(F.APPLY_SPEC) === 2);
+let records = call(F.NODE_SYNC);
+{
+  const { mem, outBase } = views();
+  const g = [];
+  let at = outBase;
+  for (let i = 0; i < records; i++) {
+    g.push(mem[at + 9]);
+    at += 11 + mem[at + 10];
+  }
+  check(
+    "both nodes carry one shared group id",
+    g.length === 2 && g[0] !== 0 && g[0] === g[1],
+    g.join(","),
+  );
+}
+put([OP.UNGROUP]);
+check("ungroup", call(F.APPLY_SPEC) === 2);
+records = call(F.NODE_SYNC);
+{
+  const { mem, outBase } = views();
+  const g = [];
+  let at = outBase;
+  for (let i = 0; i < records; i++) {
+    g.push(mem[at + 9]);
+    at += 11 + mem[at + 10];
+  }
+  check("group ids are cleared", g.every((v) => v === 0), g.join(","));
+}
+
+// Align (to the selection's left edge), arrange (one node to the front) and a
+// non-uniform scale, all through their specs.
+// The two squares are 40 apart in x, so aligning to the selection's left edge
+// moves exactly one of them (and leaves the other alone).
+call(F.SELECT_ALL);
+put([OP.ALIGN, 0, 0]);
+check("align to the selection frame", call(F.APPLY_SPEC) === 1);
+call(F.SELECT_ONLY, 2);
+call(F.NODE_BOUNDS, 2);
+check(
+  "both left edges line up",
+  out(4).map(w2f).join(",") === "10,20,40,50",
+  out(4).map(w2f).join(","),
+);
+call(F.UNDO);
+// Arranging the back-most node to the front really does reorder the document.
+const back = call(F.NODE_AT, 0);
+call(F.SELECT_ONLY, back);
+put([OP.ARRANGE, 0]);
+check("arrange the back node to the front", call(F.APPLY_SPEC) === 2);
+check("the node order changed", call(F.NODE_AT, 1) === back);
+call(F.UNDO);
+call(F.SELECT_ALL);
+put([OP.SCALE_XY, f2w(2), f2w(0.5), f2w(0), f2w(0)]);
+check("scale_x_y", call(F.APPLY_SPEC) === 2);
+call(F.SELECT_ONLY, 1);
+call(F.NODE_BOUNDS, 1);
+check(
+  "a non-uniform scale stretches x and squashes y about the pivot",
+  out(4).map(w2f).join(",") === "20,5,60,15",
+  out(4).map(w2f).join(","),
+);
+call(F.UNDO);
+while (call(F.CAN_UNDO)) call(F.UNDO);
+check("back to a clean history", call(F.HISTORY_LEN) === 0);
+
 // A longer randomised walk: undo and redo must be exact every single time.
 let seed = 0x12345678;
 const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
@@ -198,9 +366,9 @@ const snapshot = () => {
   let at = outBase;
   const nodes = [];
   for (let i = 0; i < records; i++) {
-    const words = mem[at + 9];
-    nodes.push(Array.from(mem.subarray(at, at + 10 + words)).join(":"));
-    at += 10 + words;
+    const words = mem[at + 10];
+    nodes.push(Array.from(mem.subarray(at, at + 11 + words)).join(":"));
+    at += 11 + words;
   }
   const n = call(F.SELECTION_IDS);
   const { mem: mem2, outBase: outBase2 } = views();
@@ -216,7 +384,11 @@ for (let i = 0; i < 400 && exact; i++) {
     [OP.SET_FILL, (Math.floor(rnd() * 0xffffff) << 8) | 255],
     [OP.VISIBLE, rnd() < 0.5 ? 1 : 0],
     [OP.DELETE],
-  ][Math.floor(rnd() * 5)];
+    [OP.SCALE_XY, f2w(0.5 + rnd()), f2w(0.5 + rnd()), f2w(50), f2w(50)],
+    [OP.ALIGN, 0, Math.floor(rnd() * 6)],
+    [OP.GROUP],
+    [OP.UNGROUP],
+  ][Math.floor(rnd() * 9)];
   const before = snapshot();
   put(spec);
   if (call(F.APPLY_SPEC) === 0) continue;
@@ -246,7 +418,8 @@ if (!failures.length) {
   console.log(
     `evidence: wasm artifact — ${bytes.length} bytes, ABI v${e.editor_abi_version()}, ` +
       `${instance.exports.memory.buffer.byteLength >>> 20} MiB memory after the tables allocate, ` +
-      `${walk} edits walked with exact undo and redo`,
+      `${walk} edits walked with exact undo and redo (including groups, ` +
+      `align and non-uniform scale)`,
   );
 }
 // `process.exit()` would drop buffered writes when stdout is a pipe (it is, in

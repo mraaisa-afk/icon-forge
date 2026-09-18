@@ -15,12 +15,15 @@
 
 use core::cell::RefCell;
 
-use isg_core::editor::{Command, CommandError, Editor, NodeId, Point, DEFAULT_PICK_TOLERANCE};
+use isg_core::editor::{
+    AlignEdge, AlignFrame, ArrangeTo, Command, CommandError, Editor, NodeId, Point, SnapOptions,
+    DEFAULT_PICK_TOLERANCE,
+};
 
 use crate::doc_blob::{DOC_HEADER_WORDS, NODE_HEADER_WORDS};
 
 /// ABI level of the exported entry points.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Words available in the input table (4 MiB).
 pub const IN_WORDS: usize = 1 << 20;
@@ -31,6 +34,27 @@ pub const OUT_WORDS: usize = 1 << 18;
 /// Largest document [`Abi::call`] will load, so a malformed blob cannot make the
 /// module allocate without bound.
 pub const MAX_NODES: u32 = 4096;
+
+/// Most guides one `SNAP` answer carries (mirrors `editor::snap::MAX_GUIDES`).
+pub const MAX_SNAP_GUIDES: usize = 8;
+
+/// Words per guide record: axis, kind, position, from, to.
+pub const GUIDE_WORDS: usize = 5;
+
+/// `SNAP` flags: which target families are enabled.
+pub const SNAP_CANVAS: u32 = 1 << 0;
+/// `SNAP` flags: snap to other nodes' edges and centres.
+pub const SNAP_NODES: u32 = 1 << 1;
+/// `SNAP` flags: snap to the grid.
+pub const SNAP_GRID: u32 = 1 << 2;
+/// Every `SNAP` flag the ABI defines. A request that sets a bit outside this
+/// mask is a caller bug and is refused rather than partially obeyed.
+pub const SNAP_FLAGS: u32 = SNAP_CANVAS | SNAP_NODES | SNAP_GRID;
+
+/// `PREVIEW` argument `a`: install a preview from the spec in the input table.
+pub const PREVIEW_SET: u32 = 0;
+/// `PREVIEW` argument `a`: drop the live preview.
+pub const PREVIEW_CLEAR: u32 = 1;
 
 /// Words in a document blob header — re-exported so the TypeScript blob writer
 /// and the Rust parser cannot drift apart.
@@ -129,10 +153,20 @@ pub mod feature {
     pub const SEGMENT_COUNT: u32 = 34;
     pub const NODE_AT: u32 = 35;
     pub const CLOSE: u32 = 36;
+    /// Snaps a proposed move of the selection (input: dx, dy, tolerance, flags,
+    /// grid step; output: dx, dy, guide count, guide records, terminator).
+    ///
+    /// `flags` selects the target families. With none selected the delta comes
+    /// back unchanged and the guide list is empty — snapping is simply off. A
+    /// non-finite delta or tolerance, or a flag bit outside [`SNAP_FLAGS`], is
+    /// refused with [`ERR_BAD_ARGUMENT`].
+    pub const SNAP: u32 = 37;
+    /// Installs (`a = 0`) or drops (`a = 1`) a live transform preview.
+    pub const PREVIEW: u32 = 38;
 }
 
 /// The highest feature number this ABI level defines.
-pub const MAX_FEATURE: u32 = feature::CLOSE;
+pub const MAX_FEATURE: u32 = feature::PREVIEW;
 
 // Command spec opcodes (see [`feature::APPLY_SPEC`]).
 /// `Translate`: `dx`, `dy`.
@@ -153,6 +187,18 @@ pub const OP_REORDER: u32 = 7;
 pub const OP_DUPLICATE: u32 = 8;
 /// `Delete`: no arguments.
 pub const OP_DELETE: u32 = 9;
+/// Group the selection (`4B`).
+pub const OP_GROUP: u32 = 10;
+/// Dissolve the selection's groups (`4B`).
+pub const OP_UNGROUP: u32 = 11;
+/// Move the selection to the front (`param = 0`) or back (`param = 1`) of the
+/// z-order (`4B`).
+pub const OP_ARRANGE: u32 = 12;
+/// Align the selection: `a = frame` (0 = selection box, 1 = canvas),
+/// `b = edge` (0–5, see `AlignEdge`) (`4B`).
+pub const OP_ALIGN: u32 = 13;
+/// Non-uniform scale about a pivot: `sx, sy, px, py` (`4B`).
+pub const OP_SCALE_XY: u32 = 14;
 
 /// Packs an RGBA fill into the `0xRRGGBBAA` word the ABI uses.
 #[must_use]
@@ -185,6 +231,13 @@ pub fn encode_command(command: &Command) -> Vec<u32> {
         Command::Reorder { up } => vec![OP_REORDER, u32::from(*up)],
         Command::Duplicate { dx, dy } => vec![OP_DUPLICATE, b(*dx), b(*dy)],
         Command::Delete => vec![OP_DELETE],
+        Command::ScaleXY { sx, sy, pivot } => {
+            vec![OP_SCALE_XY, b(*sx), b(*sy), b(pivot.0), b(pivot.1)]
+        }
+        Command::Arrange { to } => vec![OP_ARRANGE, to.raw()],
+        Command::Align { frame, edge } => vec![OP_ALIGN, frame.raw(), edge.raw()],
+        Command::Group => vec![OP_GROUP],
+        Command::Ungroup => vec![OP_UNGROUP],
     }
 }
 
@@ -222,6 +275,23 @@ pub fn decode_command(words: &[u32]) -> Result<Command, u32> {
             dy: float(2)?,
         }),
         OP_DELETE => Ok(Command::Delete),
+        OP_SCALE_XY => Ok(Command::ScaleXY {
+            sx: float(1)?,
+            sy: float(2)?,
+            pivot: (float(3)?, float(4)?),
+        }),
+        OP_ARRANGE => Ok(Command::Arrange {
+            to: ArrangeTo::from_raw(*words.get(1).ok_or(ERR_BAD_ARGUMENT)?)
+                .ok_or(ERR_BAD_ARGUMENT)?,
+        }),
+        OP_ALIGN => Ok(Command::Align {
+            frame: AlignFrame::from_raw(*words.get(1).ok_or(ERR_BAD_ARGUMENT)?)
+                .ok_or(ERR_BAD_ARGUMENT)?,
+            edge: AlignEdge::from_raw(*words.get(2).ok_or(ERR_BAD_ARGUMENT)?)
+                .ok_or(ERR_BAD_ARGUMENT)?,
+        }),
+        OP_GROUP => Ok(Command::Group),
+        OP_UNGROUP => Ok(Command::Ungroup),
         _ => Err(ERR_BAD_ARGUMENT),
     }
 }
@@ -354,6 +424,8 @@ impl Abi {
                     feature::GET_TOLERANCE => self.tolerance.to_bits(),
                     feature::SET_TOLERANCE => self.set_tolerance(a),
                     feature::APPLY_SPEC => self.apply_spec(a, input),
+                    feature::PREVIEW => self.preview(a, input),
+                    feature::SNAP => self.snap(input, out),
                     feature::UNDO => self.undo(),
                     feature::REDO => self.redo(),
                     feature::CAN_UNDO => u32::from(self.editor.history().can_undo()),
@@ -470,7 +542,15 @@ impl Abi {
         let mut cursor = 0;
         let mut written = 0;
         for node in doc.nodes() {
-            match crate::doc_blob::write_node_record(&mut out[cursor..], node) {
+            let record = match self.editor.preview_transform(node.id) {
+                Some(transform) => {
+                    let mut previewed = node.clone();
+                    previewed.transform = transform;
+                    crate::doc_blob::write_node_record(&mut out[cursor..], &previewed)
+                }
+                None => crate::doc_blob::write_node_record(&mut out[cursor..], node),
+            };
+            match record {
                 Some(words) => {
                     cursor += words;
                     written += 1;
@@ -498,11 +578,18 @@ impl Abi {
     }
 
     fn node_bounds(&mut self, id: u32, out: &mut [u32]) -> u32 {
-        let Some(node) = self.editor.doc().and_then(|d| d.node(NodeId::new(id))) else {
+        if self
+            .editor
+            .doc()
+            .and_then(|d| d.node(NodeId::new(id)))
+            .is_none()
+        {
             self.error = ERR_BAD_ARGUMENT;
             return 0;
-        };
-        let Some((lo, hi)) = node.bounds() else {
+        }
+        // As displayed: a live drag preview has to move the box the canvas draws
+        // (and the marquee that follows it), not just the node records.
+        let Some((lo, hi)) = self.editor.display_bounds(NodeId::new(id)) else {
             return 0;
         };
         self.write_bounds(lo, hi, out)
@@ -556,7 +643,7 @@ impl Abi {
     }
 
     fn selection_bounds(&mut self, out: &mut [u32]) -> u32 {
-        let Some((lo, hi)) = self.editor.selection_bounds() else {
+        let Some((lo, hi)) = self.editor.display_selection_bounds() else {
             return 0;
         };
         self.write_bounds(lo, hi, out)
@@ -643,6 +730,95 @@ impl Abi {
             },
             Err(code) => {
                 self.error = code;
+                0
+            }
+        }
+    }
+
+    /// Installs (`a = PREVIEW_SET`) or drops (`a = PREVIEW_CLEAR`) a live
+    /// transform preview; the returned value is the number of previewed nodes.
+    ///
+    /// The preview is what makes a drag feel live: the canvas re-syncs with no
+    /// document mutation and no history step, and the eventual commit is an
+    /// ordinary `APPLY_SPEC` of the same command.
+    fn preview(&mut self, a: u32, input: &[u32]) -> u32 {
+        if a == PREVIEW_CLEAR {
+            self.editor.preview_clear();
+            self.bump();
+            return 0;
+        }
+        let spec = match input.get(a as usize..) {
+            Some(spec) => spec,
+            None => {
+                self.error = ERR_BAD_ARGUMENT;
+                return 0;
+            }
+        };
+        let command = match decode_command(spec) {
+            Ok(command) => command,
+            Err(code) => {
+                self.error = code;
+                return 0;
+            }
+        };
+        match self.editor.preview(&command) {
+            Ok(ops) => {
+                self.bump();
+                ops as u32
+            }
+            Err(err) => {
+                self.error = error_code(err);
+                0
+            }
+        }
+    }
+
+    /// Snaps a proposed move of the selection.
+    ///
+    /// Input words: dx, dy, tolerance, flags, grid step. Output: the snapped
+    /// dx, dy, the guide count, one record per guide
+    /// (`axis, kind, position, from, to`), then the zero terminator.
+    fn snap(&mut self, input: &[u32], out: &mut [u32]) -> u32 {
+        let Some(words) = input.get(..5) else {
+            self.error = ERR_BAD_ARGUMENT;
+            return 0;
+        };
+        let f = |i: usize| f32::from_bits(words[i]);
+        let flags = words[3];
+        if flags & !SNAP_FLAGS != 0 {
+            self.error = ERR_BAD_ARGUMENT;
+            return 0;
+        }
+        let options = SnapOptions {
+            tolerance: f(2),
+            grid_step: f(4),
+            canvas: flags & SNAP_CANVAS != 0,
+            nodes: flags & SNAP_NODES != 0,
+            grid: flags & SNAP_GRID != 0,
+        };
+        match self.editor.snap_move(f(0), f(1), &options) {
+            Ok(result) => {
+                let guides = result.guides.len().min(MAX_SNAP_GUIDES);
+                if out.len() < 3 + guides * GUIDE_WORDS + 1 {
+                    self.error = ERR_CAPACITY;
+                    return 0;
+                }
+                out[0] = result.dx.to_bits();
+                out[1] = result.dy.to_bits();
+                out[2] = guides as u32;
+                for (index, guide) in result.guides.iter().take(guides).enumerate() {
+                    let at = 3 + index * GUIDE_WORDS;
+                    out[at] = guide.axis.raw();
+                    out[at + 1] = guide.kind.raw();
+                    out[at + 2] = guide.position.to_bits();
+                    out[at + 3] = guide.from.to_bits();
+                    out[at + 4] = guide.to.to_bits();
+                }
+                self.terminate(out, 3 + guides * GUIDE_WORDS);
+                guides as u32
+            }
+            Err(err) => {
+                self.error = error_code(err);
                 0
             }
         }

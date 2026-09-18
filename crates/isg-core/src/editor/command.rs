@@ -7,7 +7,7 @@
 //! exact previous state.
 
 use super::affine::Affine;
-use super::doc::NodeId;
+use super::doc::{GroupId, NodeId};
 
 /// Why a command could not be applied. A rejected command must leave the
 /// document **and** the history untouched (the editor guarantees this by
@@ -96,6 +96,140 @@ pub enum NodeOp {
         /// Source z index.
         index: usize,
     },
+    /// Move a node into a group (or out of one, with `to: None`).
+    ///
+    /// This is the only op that touches group membership, and it carries the
+    /// previous value, so grouping and ungrouping undo exactly like every other
+    /// edit — a stored value rather than a recomputed one.
+    SetGroup {
+        /// Which node.
+        id: NodeId,
+        /// The group it belongs to afterwards.
+        to: Option<GroupId>,
+    },
+}
+
+/// Where a z-order command puts the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrangeTo {
+    /// On top of everything else.
+    Front,
+    /// Under everything else.
+    Back,
+}
+
+impl ArrangeTo {
+    /// Raw wire value.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Front => 0,
+            Self::Back => 1,
+        }
+    }
+
+    /// Decodes a wire value.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Front),
+            1 => Some(Self::Back),
+            _ => None,
+        }
+    }
+}
+
+/// What an alignment lines the selection up against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignFrame {
+    /// The selection's own bounding box (aligning several objects to each
+    /// other). With a single node selected this is a no-op by construction.
+    Selection,
+    /// The canvas: its edges and its centre lines.
+    Canvas,
+}
+
+impl AlignFrame {
+    /// Raw wire value.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Selection => 0,
+            Self::Canvas => 1,
+        }
+    }
+
+    /// Decodes a wire value.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Selection),
+            1 => Some(Self::Canvas),
+            _ => None,
+        }
+    }
+}
+
+/// Which reference line of the frame an alignment uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignEdge {
+    /// Left edges.
+    Left,
+    /// Horizontal centres.
+    HCenter,
+    /// Right edges.
+    Right,
+    /// Top edges.
+    Top,
+    /// Vertical centres.
+    VCenter,
+    /// Bottom edges.
+    Bottom,
+}
+
+impl AlignEdge {
+    /// Every edge, in the order the UI lays its buttons out.
+    pub const ALL: [Self; 6] = [
+        Self::Left,
+        Self::HCenter,
+        Self::Right,
+        Self::Top,
+        Self::VCenter,
+        Self::Bottom,
+    ];
+
+    /// Raw wire value.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Left => 0,
+            Self::HCenter => 1,
+            Self::Right => 2,
+            Self::Top => 3,
+            Self::VCenter => 4,
+            Self::Bottom => 5,
+        }
+    }
+
+    /// Decodes a wire value.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Left),
+            1 => Some(Self::HCenter),
+            2 => Some(Self::Right),
+            3 => Some(Self::Top),
+            4 => Some(Self::VCenter),
+            5 => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    /// True when the edge moves the selection along x.
+    #[must_use]
+    pub const fn is_horizontal(self) -> bool {
+        matches!(self, Self::Left | Self::HCenter | Self::Right)
+    }
 }
 
 /// A user-level editing command.
@@ -108,11 +242,21 @@ pub enum Command {
         /// Vertical delta.
         dy: f32,
     },
-    /// Scale the selection about a document-space pivot.
+    /// Scale the selection uniformly about a document-space pivot.
     Scale {
-        /// Uniform factor applied on both axes (Phase 4A exposes uniform scale;
-        /// non-uniform scaling is a 4B handle edit).
+        /// Uniform factor applied on both axes.
         factor: f32,
+        /// Pivot that stays fixed.
+        pivot: (f32, f32),
+    },
+    /// Scale the selection by a factor per axis about a document-space pivot —
+    /// what dragging a corner handle produces (4B). The factors apply in
+    /// document space, exactly as the drag on screen reads.
+    ScaleXY {
+        /// Horizontal factor.
+        sx: f32,
+        /// Vertical factor.
+        sy: f32,
         /// Pivot that stays fixed.
         pivot: (f32, f32),
     },
@@ -154,6 +298,23 @@ pub enum Command {
     },
     /// Delete the selection.
     Delete,
+    /// Put the selection on top of (or under) everything else, keeping the
+    /// selection's own relative order.
+    Arrange {
+        /// Which end of the stack.
+        to: ArrangeTo,
+    },
+    /// Line the selection up against its own box or against the canvas.
+    Align {
+        /// What to line up against.
+        frame: AlignFrame,
+        /// Which reference line.
+        edge: AlignEdge,
+    },
+    /// Group the selection: picking one member afterwards selects them all.
+    Group,
+    /// Dissolve the groups the selection belongs to.
+    Ungroup,
 }
 
 impl Command {
@@ -165,7 +326,12 @@ impl Command {
             self,
             Self::Translate { .. }
                 | Self::Scale { .. }
+                | Self::ScaleXY { .. }
                 | Self::Rotate { .. }
+                | Self::Arrange { .. }
+                | Self::Align { .. }
+                | Self::Group
+                | Self::Ungroup
                 | Self::CenterOnCanvas
                 | Self::SetFill { .. }
                 | Self::SetVisible { .. }
@@ -181,7 +347,12 @@ impl Command {
         match self {
             Self::Translate { .. } => "move",
             Self::Scale { .. } => "scale",
+            Self::ScaleXY { .. } => "resize",
             Self::Rotate { .. } => "rotate",
+            Self::Arrange { .. } => "arrange",
+            Self::Align { .. } => "align",
+            Self::Group => "group",
+            Self::Ungroup => "ungroup",
             Self::CenterOnCanvas => "centre",
             Self::SetFill { .. } => "fill",
             Self::SetVisible { .. } => "visibility",

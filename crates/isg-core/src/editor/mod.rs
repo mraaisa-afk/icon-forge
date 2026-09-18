@@ -38,18 +38,22 @@ pub mod affine;
 pub mod command;
 pub mod doc;
 pub mod geom;
+pub mod snap;
 
 pub use affine::Affine;
-pub use command::{Command, CommandError, NodeOp};
-pub use doc::{Doc, Node, NodeId, DEFAULT_PICK_TOLERANCE};
+pub use command::{AlignEdge, AlignFrame, ArrangeTo, Command, CommandError, NodeOp};
+pub use doc::{Doc, GroupId, Node, NodeId, DEFAULT_PICK_TOLERANCE};
 pub use geom::{Point, Seg, Subpath};
+pub use snap::{Axis, Guide, GuideKind, SnapOptions, SnapResult};
 
 /// Wire/behaviour version of the editor engine.
 ///
 /// Bumped whenever the document model, the command set or the WASM byte
 /// protocol changes in a way the TypeScript side must notice (it is part of the
-/// `state` response and of the editor's status line).
-pub const EDITOR_VERSION: u32 = 1;
+/// `state` response and of the editor's status line). 4B added groups (a group
+/// word in every node record), the arrange/align commands, non-uniform scale
+/// and the move-preview/snap features.
+pub const EDITOR_VERSION: u32 = 2;
 
 /// Maximum number of undo steps kept per editor (older entries are dropped).
 ///
@@ -227,12 +231,26 @@ fn apply_ops(doc: &mut Doc, ops: &[NodeOp]) -> Result<(), CommandError> {
                 node.visible = *to;
                 doc.set_at(index, node);
             }
-            NodeOp::Insert { index, node } => doc.insert_at(*index, node.clone()),
+            NodeOp::Insert { index, node } => {
+                for group in node.group.iter() {
+                    doc.note_group(*group);
+                }
+                doc.insert_at(*index, node.clone());
+            }
             NodeOp::Remove { index } => {
                 if *index >= doc.node_count() {
                     return Err(CommandError::IndexOutOfRange);
                 }
                 doc.remove_at(*index);
+            }
+            NodeOp::SetGroup { id, to } => {
+                let index = doc.index_of(*id).ok_or(CommandError::MissingNode(*id))?;
+                let mut node = doc.node(*id).expect("index checked").clone();
+                node.group = *to;
+                if let Some(group) = to {
+                    doc.note_group(*group);
+                }
+                doc.set_at(index, node);
             }
         }
     }
@@ -250,6 +268,8 @@ pub struct Editor {
     doc: Option<Doc>,
     selection: Vec<NodeId>,
     history: History,
+    /// Live transform overrides for a drag in progress (see [`Editor::preview`]).
+    preview: Option<Vec<(NodeId, Affine)>>,
 }
 
 impl Default for Editor {
@@ -266,6 +286,7 @@ impl Editor {
             doc: None,
             selection: Vec::new(),
             history: History::new(),
+            preview: None,
         }
     }
 
@@ -305,6 +326,7 @@ impl Editor {
         self.doc = Some(doc);
         self.selection.clear();
         self.history = History::new();
+        self.preview = None;
     }
 
     /// Drops the document and everything derived from it.
@@ -312,25 +334,45 @@ impl Editor {
         self.doc = None;
         self.selection.clear();
         self.history = History::new();
+        self.preview = None;
+    }
+
+    /// The ids a click on `id` selects (its whole group, when it has one).
+    #[must_use]
+    pub fn selection_target(&self, id: NodeId) -> Vec<NodeId> {
+        self.doc
+            .as_ref()
+            .map_or_else(|| vec![id], |doc| doc.selection_target(id))
     }
 
     /// Replaces the selection.
     pub fn select_only(&mut self, ids: &[NodeId]) {
-        self.selection = ids.to_vec();
+        let mut expanded = Vec::with_capacity(ids.len());
+        for id in ids {
+            for member in self.selection_target(*id) {
+                if !expanded.contains(&member) {
+                    expanded.push(member);
+                }
+            }
+        }
+        self.selection = expanded;
         self.normalize_selection();
     }
 
     /// Adds a node to the selection (no-op when already selected).
     pub fn select_add(&mut self, id: NodeId) {
-        if !self.selection.contains(&id) {
-            self.selection.push(id);
+        for member in self.selection_target(id) {
+            if !self.selection.contains(&member) {
+                self.selection.push(member);
+            }
         }
         self.normalize_selection();
     }
 
-    /// Removes a node from the selection.
+    /// Removes a node from the selection (its whole group goes with it).
     pub fn select_remove(&mut self, id: NodeId) {
-        self.selection.retain(|s| *s != id);
+        let drop = self.selection_target(id);
+        self.selection.retain(|s| !drop.contains(s));
     }
 
     /// Clears the selection.
@@ -338,7 +380,7 @@ impl Editor {
         self.selection.clear();
     }
 
-    /// Toggles a node in the selection.
+    /// Toggles a node in the selection — or, for a grouped node, its group.
     pub fn select_toggle(&mut self, id: NodeId) {
         if self.selection.contains(&id) {
             self.select_remove(id);
@@ -391,10 +433,133 @@ impl Editor {
         doc.bounds(&ids)
     }
 
+    /// A node's transform as displayed, with any live preview applied.
+    #[must_use]
+    pub fn display_transform(&self, id: NodeId) -> Option<Affine> {
+        if let Some(preview) = self.preview_transform(id) {
+            return Some(preview);
+        }
+        self.doc.as_ref()?.node(id).map(|n| n.transform)
+    }
+
+    /// A node's bounding box as displayed (preview included).
+    #[must_use]
+    pub fn display_bounds(&self, id: NodeId) -> Option<(Point, Point)> {
+        let node = self.doc.as_ref()?.node(id)?;
+        node.bounds_with(self.display_transform(id)?)
+    }
+
+    /// A node's placed path as displayed (preview included).
+    #[must_use]
+    pub fn display_path(&self, id: NodeId) -> Option<Vec<Subpath>> {
+        let node = self.doc.as_ref()?.node(id)?;
+        let transform = self.display_transform(id)?;
+        Some(node.path.iter().map(|s| s.transformed(transform)).collect())
+    }
+
+    /// Selection bounds as displayed (preview included).
+    #[must_use]
+    pub fn display_selection_bounds(&self) -> Option<(Point, Point)> {
+        self.doc.as_ref()?;
+        let mut min = Point::new(f32::INFINITY, f32::INFINITY);
+        let mut max = Point::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut any = false;
+        for id in &self.selection {
+            let Some((lo, hi)) = self.display_bounds(*id) else {
+                continue;
+            };
+            min.x = min.x.min(lo.x);
+            min.y = min.y.min(lo.y);
+            max.x = max.x.max(hi.x);
+            max.y = max.y.max(hi.y);
+            any = true;
+        }
+        any.then_some((min, max))
+    }
+
+    /// Shows what a command *would* do without recording it — the live half of
+    /// a drag.
+    ///
+    /// Only transforms are previewed: the canvas needs those on every pointer
+    /// move, while a fill, a visibility or a z-order change has nothing to
+    /// interpolate. The history is untouched, [`Editor::preview_clear`] restores
+    /// exactly what was on screen before the drag began, and a commit is an
+    /// ordinary [`Editor::apply`] of the *same* command — which is what keeps
+    /// one drag equal to one undo step.
+    pub fn preview(&mut self, command: &Command) -> Result<usize, CommandError> {
+        let entry = self.build_entry(command)?;
+        if entry.forward.is_empty() {
+            return Err(CommandError::NoOp);
+        }
+        let overrides: Vec<(NodeId, Affine)> = entry
+            .forward
+            .iter()
+            .filter_map(|op| match op {
+                NodeOp::SetTransform { id, to } => Some((*id, *to)),
+                _ => None,
+            })
+            .collect();
+        self.preview = (!overrides.is_empty()).then_some(overrides);
+        Ok(entry.forward.len())
+    }
+
+    /// Drops any live preview.
+    pub fn preview_clear(&mut self) {
+        self.preview = None;
+    }
+
+    /// True while a preview is live.
+    #[must_use]
+    pub fn preview_active(&self) -> bool {
+        self.preview.is_some()
+    }
+
+    /// The previewed transform of one node, if it has one.
+    #[must_use]
+    pub fn preview_transform(&self, id: NodeId) -> Option<Affine> {
+        self.preview
+            .as_ref()?
+            .iter()
+            .find(|(candidate, _)| *candidate == id)
+            .map(|(_, transform)| *transform)
+    }
+
+    /// Snaps a proposed move of the current selection.
+    ///
+    /// The delta passed in is the *proposed* one and the base is the stored
+    /// (un-previewed) geometry, so the UI can ask for the snapped delta first
+    /// and then preview or apply exactly that — the two can never drift.
+    pub fn snap_move(
+        &self,
+        dx: f32,
+        dy: f32,
+        options: &SnapOptions,
+    ) -> Result<SnapResult, CommandError> {
+        let doc = self.doc.as_ref().ok_or(CommandError::NoDocument)?;
+        if self.selection.is_empty() {
+            return Err(CommandError::EmptySelection);
+        }
+        if !dx.is_finite()
+            || !dy.is_finite()
+            || !options.tolerance.is_finite()
+            || options.tolerance < 0.0
+        {
+            return Err(CommandError::DegenerateTransform);
+        }
+        Ok(
+            snap::snap_move(doc, &self.selection, dx, dy, options).unwrap_or(SnapResult {
+                dx,
+                dy,
+                guides: Vec::new(),
+            }),
+        )
+    }
+
     /// Applies a command, recording an exact inverse.
     ///
     /// Validates first: a rejected command leaves the document and the history
-    /// untouched and returns the reason.
+    /// untouched and returns the reason. A successful edit also drops any live
+    /// preview, so a preview can never outlive the state it was drawn against.
     pub fn apply(&mut self, command: &Command) -> Result<usize, CommandError> {
         let entry = self.build_entry(command)?;
         if entry.forward.is_empty() {
@@ -402,6 +567,7 @@ impl Editor {
         }
         let doc = self.doc.as_mut().ok_or(CommandError::NoDocument)?;
         apply_ops(doc, &entry.forward)?;
+        self.preview = None;
         self.selection = entry.selection_after.clone();
         // Canonicalise immediately: `undo`/`redo` restore the recorded
         // selections through `normalize_selection`, so an edit must leave the
@@ -417,6 +583,7 @@ impl Editor {
     /// Undoes one step.
     pub fn undo(&mut self) -> Result<&'static str, CommandError> {
         let doc = self.doc.as_mut().ok_or(CommandError::NoDocument)?;
+        self.preview = None;
         let selection = self.history.step(doc, false)?;
         let label = self.history.redo_label().unwrap_or("edit");
         self.selection = selection;
@@ -427,6 +594,7 @@ impl Editor {
     /// Redoes one step.
     pub fn redo(&mut self) -> Result<&'static str, CommandError> {
         let doc = self.doc.as_mut().ok_or(CommandError::NoDocument)?;
+        self.preview = None;
         let cursor = self.history.cursor();
         let selection = self.history.step(doc, true)?;
         let label = self
@@ -504,6 +672,137 @@ impl Editor {
                 for (_, node) in &targets {
                     let to = node.transform.then(about);
                     push_transform(&mut forward, &mut raw_inverse, node, to)?;
+                }
+            }
+            Command::ScaleXY { sx, sy, pivot } => {
+                if !sx.is_finite() || !sy.is_finite() || *sx <= 0.0 || *sy <= 0.0 {
+                    return Err(CommandError::DegenerateTransform);
+                }
+                let (px, py) = *pivot;
+                if !px.is_finite() || !py.is_finite() {
+                    return Err(CommandError::DegenerateTransform);
+                }
+                let about = Affine::translate(-px, -py)
+                    .then(Affine::scale(*sx, *sy))
+                    .then(Affine::translate(px, py));
+                for (_, node) in &targets {
+                    let to = node.transform.then(about);
+                    push_transform(&mut forward, &mut raw_inverse, node, to)?;
+                }
+            }
+            Command::Align { frame, edge } => {
+                let reference = match frame {
+                    AlignFrame::Selection => doc.bounds(&selection_before),
+                    AlignFrame::Canvas => {
+                        Some((Point::new(0.0, 0.0), Point::new(doc.width(), doc.height())))
+                    }
+                };
+                let Some((reference_lo, reference_hi)) = reference else {
+                    return Err(CommandError::EmptySelection);
+                };
+                for (_, node) in &targets {
+                    let Some((lo, hi)) = node.bounds() else {
+                        continue;
+                    };
+                    let (dx, dy) = match edge {
+                        AlignEdge::Left => (reference_lo.x - lo.x, 0.0),
+                        AlignEdge::HCenter => (
+                            (reference_lo.x + reference_hi.x) / 2.0 - (lo.x + hi.x) / 2.0,
+                            0.0,
+                        ),
+                        AlignEdge::Right => (reference_hi.x - hi.x, 0.0),
+                        AlignEdge::Top => (0.0, reference_lo.y - lo.y),
+                        AlignEdge::VCenter => (
+                            0.0,
+                            (reference_lo.y + reference_hi.y) / 2.0 - (lo.y + hi.y) / 2.0,
+                        ),
+                        AlignEdge::Bottom => (0.0, reference_hi.y - hi.y),
+                    };
+                    if dx == 0.0 && dy == 0.0 {
+                        continue;
+                    }
+                    let to = node.transform.then(Affine::translate(dx, dy));
+                    push_transform(&mut forward, &mut raw_inverse, node, to)?;
+                }
+            }
+            Command::Arrange { to } => {
+                // Simulated so every index is exact: `front` walks the selection
+                // top-down (each node lands just above the block already moved)
+                // and `back` bottom-up, which keeps the selection's own order.
+                let mut order: Vec<NodeId> = selection_before.clone();
+                if *to == ArrangeTo::Front {
+                    order.reverse();
+                }
+                let count = doc.node_count();
+                let mut current: Vec<NodeId> = doc.ids();
+                for (placed, id) in order.iter().enumerate() {
+                    let Some(from) = current.iter().position(|candidate| candidate == id) else {
+                        continue;
+                    };
+                    let at = match to {
+                        ArrangeTo::Front => (count - 1).saturating_sub(placed),
+                        ArrangeTo::Back => placed,
+                    }
+                    .min(count - 1);
+                    if from == at {
+                        continue;
+                    }
+                    current.remove(from);
+                    current.insert(at, *id);
+                    let node = doc.node(*id).expect("id came from the selection").clone();
+                    forward.push(NodeOp::Remove { index: from });
+                    forward.push(NodeOp::Insert {
+                        index: at,
+                        node: node.clone(),
+                    });
+                    raw_inverse.push(NodeOp::Insert { index: from, node });
+                    raw_inverse.push(NodeOp::Remove { index: at });
+                }
+            }
+            Command::Group => {
+                if targets.len() < 2 {
+                    return Err(CommandError::NoOp);
+                }
+                let mut existing: Vec<GroupId> =
+                    targets.iter().filter_map(|(_, node)| node.group).collect();
+                existing.sort_unstable();
+                existing.dedup();
+                if existing.len() == 1
+                    && targets
+                        .iter()
+                        .all(|(_, node)| node.group == existing.first().copied())
+                {
+                    // Every target is already in the same group: nothing to do.
+                    return Err(CommandError::NoOp);
+                }
+                let group = GroupId::new(doc.next_group());
+                for (_, node) in &targets {
+                    if node.group == Some(group) {
+                        continue;
+                    }
+                    forward.push(NodeOp::SetGroup {
+                        id: node.id,
+                        to: Some(group),
+                    });
+                    raw_inverse.push(NodeOp::SetGroup {
+                        id: node.id,
+                        to: node.group,
+                    });
+                }
+            }
+            Command::Ungroup => {
+                for (_, node) in &targets {
+                    let Some(group) = node.group else {
+                        continue;
+                    };
+                    forward.push(NodeOp::SetGroup {
+                        id: node.id,
+                        to: None,
+                    });
+                    raw_inverse.push(NodeOp::SetGroup {
+                        id: node.id,
+                        to: Some(group),
+                    });
                 }
             }
             Command::CenterOnCanvas => {
@@ -987,5 +1286,291 @@ mod tests {
         ed.undo().unwrap();
         let (lo, hi) = ed.doc().unwrap().node(ids[0]).unwrap().bounds().unwrap();
         assert_eq!((lo.x, lo.y, hi.x, hi.y), (10.0, 10.0, 30.0, 30.0));
+    }
+    // -- 4B: groups, arrange, align, non-uniform scale, preview ---------------
+
+    #[test]
+    fn grouping_makes_the_members_select_as_one() {
+        let mut ed = editor_with_two_nodes();
+        let ids = ed.doc().unwrap().ids();
+        ed.select_all();
+        let before = ed.clone();
+        assert_eq!(ed.apply(&Command::Group).unwrap(), 2);
+        let group = ed.doc().unwrap().group_of(ids[0]).expect("grouped");
+        assert_eq!(ed.doc().unwrap().group_of(ids[1]), Some(group));
+        assert_eq!(ed.doc().unwrap().members(group), ids);
+
+        // Any member now selects the whole group, from any entry point.
+        ed.select_clear();
+        ed.select_only(&[ids[1]]);
+        assert_eq!(ed.selection(), ids.as_slice());
+        ed.select_clear();
+        ed.select_add(ids[0]);
+        assert_eq!(ed.selection(), ids.as_slice());
+        ed.select_toggle(ids[1]);
+        assert!(
+            ed.selection().is_empty(),
+            "toggling a member drops the group"
+        );
+
+        // A grouped click target is the group, not the node.
+        assert_eq!(ed.selection_target(ids[0]), ids);
+        ed.undo().unwrap();
+        assert_eq!(ed.doc().unwrap().group_count(), 0);
+        // The view, not the whole `Doc`: like node ids, a group id is never
+        // reused, so the counter legitimately stays ahead after an undo.
+        assert_eq!(view(&ed), view(&before), "ungroup restores the nodes");
+    }
+
+    #[test]
+    fn ungroup_leaves_the_members_alone_and_is_invertible() {
+        let mut ed = editor_with_two_nodes();
+        let ids = ed.doc().unwrap().ids();
+        ed.select_all();
+        ed.apply(&Command::Group).unwrap();
+        assert_eq!(ed.apply(&Command::Ungroup).unwrap(), 2);
+        assert_eq!(ed.doc().unwrap().group_count(), 0);
+        ed.undo().unwrap();
+        assert!(ed.doc().unwrap().group_of(ids[0]).is_some());
+        ed.redo().unwrap();
+        assert!(ed.doc().unwrap().group_of(ids[0]).is_none());
+    }
+
+    #[test]
+    fn grouping_validates_before_recording() {
+        let mut ed = editor_with_two_nodes();
+        let ids = ed.doc().unwrap().ids();
+        ed.select_only(&ids[0..1]);
+        assert_eq!(ed.apply(&Command::Group), Err(CommandError::NoOp));
+        assert!(!ed.history().can_undo());
+        ed.select_all();
+        ed.apply(&Command::Group).unwrap();
+        // Selecting a group and grouping it again changes nothing.
+        assert_eq!(ed.apply(&Command::Group), Err(CommandError::NoOp));
+        assert_eq!(ed.history().cursor(), 1);
+        ed.select_only(&ids[0..1]);
+        assert_eq!(ed.apply(&Command::Ungroup).unwrap(), 2);
+    }
+
+    #[test]
+    fn arrange_moves_the_selection_to_the_ends_and_keeps_its_order() {
+        let mut ed = editor_with_two_nodes();
+        let ids = ed.doc().unwrap().ids();
+        // Bottom two of three selected, moved to the front: relative order kept.
+        ed.select_all();
+        ed.apply(&Command::Duplicate { dx: 0.0, dy: 0.0 }).unwrap();
+        let all = ed.doc().unwrap().ids();
+        ed.select_only(&[ids[0], ids[1]]);
+        ed.apply(&Command::Arrange {
+            to: ArrangeTo::Front,
+        })
+        .unwrap();
+        let after = ed.doc().unwrap().ids();
+        assert_eq!(after[after.len() - 2..], [ids[0], ids[1]]);
+        assert_eq!(after.len(), all.len());
+        ed.undo().unwrap();
+        assert_eq!(ed.doc().unwrap().ids(), all, "arrange undoes exactly");
+
+        // Back to where they started, which is already the back of the stack.
+        ed.select_only(&[ids[0], ids[1]]);
+        assert_eq!(
+            ed.apply(&Command::Arrange {
+                to: ArrangeTo::Back
+            }),
+            Err(CommandError::NoOp)
+        );
+        ed.apply(&Command::Arrange {
+            to: ArrangeTo::Front,
+        })
+        .unwrap();
+        ed.apply(&Command::Arrange {
+            to: ArrangeTo::Back,
+        })
+        .unwrap();
+        assert_eq!(ed.doc().unwrap().ids()[..2], [ids[0], ids[1]]);
+        assert_eq!(
+            ed.apply(&Command::Arrange {
+                to: ArrangeTo::Back
+            }),
+            Err(CommandError::NoOp),
+            "already at the back"
+        );
+    }
+
+    #[test]
+    fn align_lines_the_selection_up_against_its_own_box_and_the_canvas() {
+        let mut ed = editor_with_two_nodes();
+        let ids = ed.doc().unwrap().ids();
+        ed.select_all();
+        ed.apply(&Command::Align {
+            frame: AlignFrame::Selection,
+            edge: AlignEdge::Left,
+        })
+        .unwrap();
+        let lefts: Vec<f32> = ids
+            .iter()
+            .map(|id| ed.doc().unwrap().node(*id).unwrap().bounds().unwrap().0.x)
+            .collect();
+        assert_eq!(lefts, vec![10.0, 10.0]);
+        ed.undo().unwrap();
+        assert_eq!(
+            ed.doc().unwrap().node(ids[1]).unwrap().transform,
+            Affine::IDENTITY
+        );
+
+        // Against the canvas: the selection's centre lands on the canvas centre.
+        ed.select_all();
+        ed.apply(&Command::Align {
+            frame: AlignFrame::Canvas,
+            edge: AlignEdge::HCenter,
+        })
+        .unwrap();
+        let (lo, hi) = ed.selection_bounds().unwrap();
+        assert_eq!((lo.x + hi.x) / 2.0, 50.0);
+        ed.apply(&Command::Align {
+            frame: AlignFrame::Canvas,
+            edge: AlignEdge::Right,
+        })
+        .unwrap();
+        let (_lo, hi) = ed.selection_bounds().unwrap();
+        assert_eq!(hi.x, 100.0);
+        // Aligned already: not a history step.
+        assert_eq!(
+            ed.apply(&Command::Align {
+                frame: AlignFrame::Canvas,
+                edge: AlignEdge::Right,
+            }),
+            Err(CommandError::NoOp)
+        );
+    }
+
+    #[test]
+    fn non_uniform_scale_stretches_and_undoes_exactly() {
+        let mut ed = editor_with_two_nodes();
+        let id = ed.doc().unwrap().ids()[0];
+        ed.select_only(&[id]);
+        let before = ed.doc().unwrap().node(id).unwrap().transform;
+        ed.apply(&Command::ScaleXY {
+            sx: 2.0,
+            sy: 0.5,
+            pivot: (10.0, 10.0),
+        })
+        .unwrap();
+        let (lo, hi) = ed.doc().unwrap().node(id).unwrap().bounds().unwrap();
+        assert_eq!((lo.x, lo.y), (10.0, 10.0));
+        assert_eq!((hi.x, hi.y), (50.0, 20.0));
+        ed.undo().unwrap();
+        assert_eq!(ed.doc().unwrap().node(id).unwrap().transform, before);
+        ed.redo().unwrap();
+        let (_, hi) = ed.doc().unwrap().node(id).unwrap().bounds().unwrap();
+        assert_eq!((hi.x, hi.y), (50.0, 20.0));
+        ed.undo().unwrap();
+    }
+
+    #[test]
+    fn a_preview_shows_without_recording_and_commits_identically() {
+        let mut ed = editor_with_two_nodes();
+        let id = ed.doc().unwrap().ids()[0];
+        ed.select_only(&[id]);
+        let stored = ed.doc().unwrap().node(id).unwrap().transform;
+        let command = Command::Translate { dx: 12.0, dy: -4.0 };
+        ed.preview(&command).unwrap();
+        assert!(ed.preview_active());
+        assert_ne!(ed.display_transform(id).unwrap(), stored);
+        assert_eq!(
+            ed.doc().unwrap().node(id).unwrap().transform,
+            stored,
+            "a preview never mutates the document"
+        );
+        assert!(!ed.history().can_undo(), "a preview is not a history step");
+        let previewed = ed.display_bounds(id).unwrap();
+
+        ed.preview_clear();
+        assert!(!ed.preview_active());
+        assert_eq!(ed.display_transform(id).unwrap(), stored);
+
+        // Committing the same command reproduces exactly what was previewed.
+        ed.preview(&command).unwrap();
+        ed.apply(&command).unwrap();
+        assert!(!ed.preview_active(), "a commit drops the live preview");
+        assert_eq!(ed.display_bounds(id).unwrap(), previewed);
+        assert_eq!(ed.history().cursor(), 1, "one drag is one undo step");
+    }
+
+    #[test]
+    fn previews_validate_like_commands_and_disappear_with_the_document() {
+        let mut ed = editor_with_two_nodes();
+        assert_eq!(
+            ed.preview(&Command::Translate { dx: 1.0, dy: 1.0 }),
+            Err(CommandError::EmptySelection)
+        );
+        let id = ed.doc().unwrap().ids()[0];
+        ed.select_only(&[id]);
+        assert_eq!(
+            ed.preview(&Command::Translate { dx: 0.0, dy: 0.0 }),
+            Err(CommandError::ZeroDelta)
+        );
+        ed.preview(&Command::Translate { dx: 1.0, dy: 1.0 })
+            .unwrap();
+        ed.undo()
+            .expect_err("nothing was recorded, so there is nothing to undo");
+        ed.close();
+        assert!(!ed.preview_active());
+    }
+
+    #[test]
+    fn snap_reports_the_delta_it_would_apply_and_the_guides_that_explain_it() {
+        let mut ed = editor_with_two_nodes();
+        let id = ed.doc().unwrap().ids()[1]; // square at (50, 50)-(70, 70)
+        ed.select_only(&[id]);
+        // A drag that lands the left edge 2 px short of the canvas centre line.
+        let options = SnapOptions {
+            tolerance: 6.0,
+            ..SnapOptions::default()
+        };
+        let snapped = ed.snap_move(48.0 - 50.0, 20.0, &options).unwrap();
+        assert_eq!((snapped.dx, snapped.dy), (0.0, 20.0), "left edge → centre");
+        assert!(snapped
+            .guides
+            .iter()
+            .any(|g| g.axis == Axis::X && g.kind == GuideKind::CanvasCenter && g.position == 50.0));
+        // Far from every target: the proposed delta passes through untouched.
+        let free = ed.snap_move(13.0, 20.0, &options).unwrap();
+        assert_eq!((free.dx, free.dy), (13.0, 20.0));
+        assert!(free.guides.is_empty());
+        // With every family off there is nothing to snap to at all.
+        let off = SnapOptions {
+            canvas: false,
+            nodes: false,
+            grid: false,
+            ..options
+        };
+        assert!(!off.is_active());
+        let raw = ed.snap_move(48.0 - 50.0, 0.0, &off).unwrap();
+        assert_eq!(raw.dx, -2.0);
+    }
+
+    #[test]
+    fn snapping_prefers_the_nearest_target_and_stays_inside_the_tolerance() {
+        let mut ed = editor_with_two_nodes();
+        let ids = ed.doc().unwrap().ids();
+        ed.select_only(&ids[1..2]);
+        // The other node spans x 10..30. The proposed box lands at x 35..55, so
+        // its left edge is 5 px from that node's right edge (30) *and* its centre
+        // is 5 px from the canvas centre line (50): a tie, which the node wins.
+        let options = SnapOptions {
+            tolerance: 6.0,
+            ..SnapOptions::default()
+        };
+        let snapped = ed.snap_move(35.0 - 50.0, 0.0, &options).unwrap();
+        assert_eq!(snapped.dx, 30.0 - 50.0);
+        assert!(snapped.guides.iter().any(|g| g.kind == GuideKind::NodeEdge));
+        // A tolerance of zero disables snapping rather than snapping to the
+        // nearest thing regardless of distance.
+        let strict = SnapOptions {
+            tolerance: 0.0,
+            ..options
+        };
+        assert!(!strict.is_active());
     }
 }
