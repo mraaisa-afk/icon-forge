@@ -528,7 +528,13 @@ fn f4_the_exports_are_conservative_documents() {
 
     // --- PDF ---------------------------------------------------------------
     let pdf = write_sheet_pdf(&plan, &artwork, &PdfOptions::default()).expect("pdf writes");
-    assert!(pdf.starts_with(b"%PDF-1.4"), "a version every reader ships");
+    // The version the writer emits — 1.7 has shipped in every reader since
+    // 2006, and none of its later features are used (the assertions below are
+    // the ones that matter: no filters, no object streams, a classic xref).
+    assert!(
+        pdf.starts_with(b"%PDF-1.7"),
+        "the documented header version"
+    );
     assert!(
         pdf.ends_with(b"%%EOF\n"),
         "a complete file, not a truncated one"
