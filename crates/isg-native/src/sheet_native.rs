@@ -179,7 +179,8 @@ pub fn render_sheet_png(
 
 /// Composites straight RGBA over an opaque background, keeping four channels.
 fn composite_in_place(rgba: &mut [u8], background: [u8; 4]) {
-    for pixel in rgba.chunks_exact_mut(4) {
+    // Same clippy request as `export::png`'s two loops, on the mutable side.
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let a = u32::from(pixel[3]);
         let mix = |src: u8, bg: u8| -> u8 {
             (((u32::from(src) * a) + (u32::from(bg) * (255 - a)) + 127) / 255) as u8

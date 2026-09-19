@@ -377,7 +377,10 @@ fn zlib_inflate_stored(idat: &[u8]) -> Result<Vec<u8>, PngError> {
 #[must_use]
 pub fn unpremultiply(rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len());
-    for pixel in rgba.chunks_exact(4) {
+    // `as_chunks` (not `chunks_exact`) is what the current stable clippy asks for:
+    // the element type becomes `&[u8; 4]`, so the remainder handling stays
+    // explicit and the alpha at `pixel[3]` keeps its fixed index.
+    for pixel in rgba.as_chunks::<4>().0 {
         let a = u16::from(pixel[3]);
         if a == 0 {
             out.extend_from_slice(&[0, 0, 0, 0]);
@@ -402,7 +405,10 @@ pub fn unpremultiply(rgba: &[u8]) -> Vec<u8> {
 #[must_use]
 pub fn composite_over_rgb(rgba: &[u8], background: [u8; 4]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
-    for pixel in rgba.chunks_exact(4) {
+    // `as_chunks` (not `chunks_exact`) is what the current stable clippy asks for:
+    // the element type becomes `&[u8; 4]`, so the remainder handling stays
+    // explicit and the alpha at `pixel[3]` keeps its fixed index.
+    for pixel in rgba.as_chunks::<4>().0 {
         let a = u32::from(pixel[3]);
         let mix = |src: u8, bg: u8| -> u8 {
             (((u32::from(src) * a) + (u32::from(bg) * (255 - a)) + 127) / 255) as u8
