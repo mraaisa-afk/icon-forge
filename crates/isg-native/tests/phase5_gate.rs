@@ -587,11 +587,15 @@ fn f4_the_exports_are_conservative_documents() {
 
     eprintln!(
         "evidence: phase5 F4 svg={} B ({} paths, presentation attributes only, no external refs) \
-         pdf={} B (PDF-1.4, {} fills, {operators} operators, no filters/xref-stream) png={} B \
+         pdf={} B ({}, {} fills, {operators} operators, no filters/xref-stream) png={} B \
          (8-bit RGBA, no interlace, {} B of IDAT)",
         svg.len(),
         shapes,
         pdf.len(),
+        // The version read back out of the file, not a label typed next to it:
+        // this line said "PDF-1.4" for one run after the assertion above was
+        // corrected to the 1.7 the writer actually emits.
+        &text[..8],
         shapes,
         raster.png.len(),
         png.idat_bytes
