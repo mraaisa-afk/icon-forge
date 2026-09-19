@@ -141,12 +141,20 @@ jobs:
           if [ -z "$EVIDENCE" ]; then
             EVIDENCE=$(tail -100 target/test-evidence.txt 2>/dev/null || true)
           fi
+          # The phase-5 exit criteria have their own notice: the phase-specific
+          # lines (`evidence: phase5 …`) are printed last by the suite, so in
+          # the combined notice above they fall past the ~4 KiB cut and become
+          # unreachable through the API. One notice per phase under review is
+          # the convention here (see the editor's two).
+          PHASE5=$(grep -hE 'evidence: phase5' \
+            target/test-evidence.txt 2>/dev/null | head -20 || true)
           {
             echo "## Evidence (run-produced)"
             echo '```text'
             printf '%s\n' "$ARTIFACT"
             printf '%s\n' "$ADAPTER"
             printf '%s\n' "$EVIDENCE"
+            printf '%s\n' "$PHASE5"
             echo '```'
             echo '```json'
             tail -c 3000 target/spike-evidence.json 2>/dev/null || true
@@ -171,6 +179,7 @@ jobs:
           announce "Icon Forge editor artifact evidence" "$ARTIFACT"
           announce "Icon Forge editor adapter evidence" "$ADAPTER"
           announce "Icon Forge evidence" "$EVIDENCE"
+          announce "Icon Forge phase 5 evidence" "$PHASE5"
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
       # has no rustfmt, so formatting is verified here and fixed from the

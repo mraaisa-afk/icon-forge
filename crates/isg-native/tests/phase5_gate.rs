@@ -559,7 +559,10 @@ fn f4_the_exports_are_conservative_documents() {
     // reader implements — nothing here needs a feature only some viewers have.
     let allowed: &[&str] = &["q", "Q", "rg", "re", "f", "f*", "m", "l", "c", "h"];
     let mut operators = 0usize;
-    for part in text.split("stream\n").skip(1) {
+    // The stream keyword is always the whole line after the dictionary, and
+    // `endstream` itself ends with `stream` — so split on the *line*, not on
+    // the bare word, or the `end` of every `endstream` looks like an operator.
+    for part in text.split("\nstream\n").skip(1) {
         let body = part.split("endstream").next().unwrap_or_default();
         for token in body.split_whitespace() {
             assert!(
