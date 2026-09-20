@@ -280,6 +280,20 @@ Plus keyboard triage: `A`pprove / `R`eject / `F`lag / `D`uplicate / `Space` over
 
 **The Phase 4 exit criterion's host walk is raised to 10 000 randomised sequences** (§8 logs this as 4C's, and the walk now covers the five point-edit opcodes too, drawing each address from the geometry that exists at that moment). The 4C evidence line reports 25 host ABI tests, and the wasm smoke test walks 318 edits through the built artifact including point edits, booleans and SVG import in both directions.
 
+### 3.10 Review system as built (Phase 6)
+
+**The detectors are pure; only the pixels are native.** Everything §3.6 defines a threshold for — the quality flags, the duplicate cascade's control flow, the modified z-scores, the triage log — lives in `isg-native::review`, which has no renderer, no image decoder and no external crate, so all of it is unit-tested without a corpus. The half that needs a renderer is `isg-native::review_native`: it normalises each icon into a 64 × 64 cell and hands the planes to the cascade. The seam between them is plain data (`HashItem`, `IconStat`, `Score`), which is why the cascade can be measured at 1000 icons without a sheet.
+
+**One normalised cell defines what an icon "looks like".** The cell is rendered at 2× and box-filtered down, with the **longest side fitted and the aspect preserved** — stretching each icon to the full square would map a 40 × 20 rectangle and a 40 × 40 square onto the same pixels and the cascade would call them duplicates. The reduction to an ink-evidence plane (distance from the sheet's background after compositing) is the same rule stage ⑧ uses, so a pixel outside the ink is 0 by construction and the hashes, IoU and Hausdorff distance all read one plane.
+
+**The cascade may only narrow.** dHash (9 × 8 gradient) and aHash (8 × 8 mean) over the cell, banded into four 16-bit LSH keys each, propose candidate pairs in `O(n)` instead of `O(n²)`; ink IoU ≥ 0.92 **or** normalised Hausdorff ≤ 0.02 (a two-pass chamfer over the cell, symmetric and divided by the cell diagonal) verifies a candidate; and only an identical blake3 digest of the cell or SSIM ≥ 0.97 confirms it. Nothing is reported as a duplicate on a hash match alone — that is where precision comes from — and the SSIM is `pipeline::score::compare_planes`, the *same* metric stage ⑧ scores with, made public for the purpose: two implementations that could round differently would make an icon "a duplicate" in the review and "not a duplicate" in its own quality score.
+
+**Outliers use MAD, with the fallback that matters.** Modified z-scores `0.6745·(x − median)/MAD` above 3.5 over ink size, stroke, node count, colours and solidity, plus modal style/palette mismatch when one class covers at least half the sheet. The fallback is the point: the MAD is **zero** exactly when more than half the sheet is identical — the roadmap's own *"99 icons are 2 px outline, one is a filled blob"* — so a zero MAD falls back to the mean absolute deviation (Iglewicz & Hoaglin), and a sheet where every value is equal reports no outliers instead of dividing by zero.
+
+**The triage log is state, not a list.** At most one decision per icon, each timestamped and sequence-numbered; `undo` restores *the decision it replaced* (a flag that was then rejected goes back to flagged, not to undecided); sequence numbers never go backwards, so `review.csv` is stable and its rows are chronological regardless of the ids. The export round-trips through the sheet module's own `parse_csv`. An imported log deliberately has no undo history: the keystrokes that produced the file are not in it.
+
+**The quality composite comes from stage ⑧ at 2× cell.** `LowQuality` is defined on the composite, so the review calls `score_svg` — the sheet's real crop at 2× cell against the icon's own document — rather than re-deriving the metric at another scale, which would let the review panel disagree with the score the user already sees next to the same icon. `OverComplex` compares the outline's segment count against `4·√ink-area`, and an icon with no ink is never over-complex (its budget is zero).
+
 ---
 
 ## 4. Data Model (sketch)

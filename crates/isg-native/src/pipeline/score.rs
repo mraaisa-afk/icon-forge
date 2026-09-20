@@ -336,7 +336,14 @@ fn ssim_planes(a: &[u8], b: &[u8], w: u32, h: u32) -> f64 {
 
 /// Aligns both planes on their ink centroids (integer shift) and computes
 /// MAE / SSIM / IoU plus the composite.
-fn compare_planes(reference: &[u8], render: &[u8], w: u32, h: u32) -> Score {
+///
+/// Public because the §3.6 duplicate cascade's confirm stage is defined in
+/// terms of *this* SSIM: two implementations of the metric that could round
+/// differently would make a pair "a duplicate" in the review panel and "not a
+/// duplicate" in the quality score, which is worse than having no number at
+/// all. Both planes are u8 ink-evidence planes of `w × h`.
+#[must_use]
+pub fn compare_planes(reference: &[u8], render: &[u8], w: u32, h: u32) -> Score {
     let shift = match (
         alpha_centroid(reference, w, h),
         alpha_centroid(render, w, h),

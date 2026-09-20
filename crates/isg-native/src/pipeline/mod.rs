@@ -64,7 +64,8 @@ pub use profiles::{profile, TraceProfile};
 pub use quantize::{Layer, QuantizeParams};
 pub use raster::SheetRaster;
 pub use score::{
-    cached_vectorize, vectorize_scored, Score, ScoreError, ScoredIcon, VectorizeError,
+    cached_vectorize, compare_planes, score_svg, vectorize_scored, Score, ScoreError, ScoredIcon,
+    VectorizeError,
 };
 pub use simplify::SimplifyParams;
 pub use split::{SplitParams, SplitStats, SPLIT_VERSION};

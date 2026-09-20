@@ -148,6 +148,8 @@ jobs:
           # the convention here (see the editor's two).
           PHASE5=$(grep -hE 'evidence: phase5' \
             target/test-evidence.txt 2>/dev/null | head -20 || true)
+          PHASE6=$(grep -hE 'evidence: phase6' \
+            target/test-evidence.txt 2>/dev/null | head -20 || true)
           {
             echo "## Evidence (run-produced)"
             echo '```text'
@@ -155,6 +157,7 @@ jobs:
             printf '%s\n' "$ADAPTER"
             printf '%s\n' "$EVIDENCE"
             printf '%s\n' "$PHASE5"
+            printf '%s\n' "$PHASE6"
             echo '```'
             echo '```json'
             tail -c 3000 target/spike-evidence.json 2>/dev/null || true
@@ -180,6 +183,7 @@ jobs:
           announce "Icon Forge editor adapter evidence" "$ADAPTER"
           announce "Icon Forge evidence" "$EVIDENCE"
           announce "Icon Forge phase 5 evidence" "$PHASE5"
+          announce "Icon Forge phase 6 evidence" "$PHASE6"
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
       # has no rustfmt, so formatting is verified here and fixed from the
