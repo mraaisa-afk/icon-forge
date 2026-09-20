@@ -9,12 +9,22 @@
 //!
 //! # The normalised cell
 //!
-//! Every icon is rendered into a 64 × 64 square with its **longest side
-//! scaled to fill it**, aspect preserved, centred, on the sheet's background
-//! colour — then reduced to an ink-evidence plane (0 where the pixel is the
-//! background, up to 255 where it is maximally different from it).
+//! Every icon is rendered into a 64 × 64 square with the **longest side of its
+//! ink** scaled to fill it, aspect preserved, centred, on the sheet's
+//! background colour — then reduced to an ink-evidence plane (0 where the pixel
+//! is the background, up to 255 where it is maximally different from it).
 //!
-//! Two details are load-bearing:
+//! Three details are load-bearing:
+//!
+//! * **The cell is fitted to the ink, not to the document.** The document a
+//!   caller hands in is a crop, and a crop carries whatever margin the icon had
+//!   on the sheet (the grouping gap) plus the icon's own size jitter. Fitting
+//!   the crop would make the same logo traced at 46 px and at 50 px land in the
+//!   cell at two different scales: the aHash — which thresholds against the
+//!   cell's *mean*, and therefore moves with the ink's coverage — would put
+//!   them in different LSH buckets and the cascade would never get to compare
+//!   them. Fitting the ink box makes the comparison what it should be, a
+//!   question about the artwork rather than about the margin around it.
 //!
 //! * **Aspect is preserved, not stretched.** Stretching every icon to the full
 //!   square would map a 40 × 20 rectangle and a 40 × 40 square onto the same
@@ -44,7 +54,7 @@ use isg_core::{Bbox, ForegroundMask};
 use crate::pipeline::raster::SheetRaster;
 use crate::pipeline::score::{compare_planes, score_svg, Score};
 use crate::review::dupes::{
-    candidate_pairs, cluster, confirm, verify, DupCluster, DupOptions, HashItem,
+    candidate_pairs, cluster, confirm, verify, DupCluster, DupOptions, HashItem, INK_THRESHOLD,
 };
 use crate::review::outliers::{scan as scan_outliers, IconStat, OutlierFlag};
 use crate::review::quality::{flags as quality_flags, QualityFlag, QualityInput};
@@ -245,12 +255,88 @@ impl std::fmt::Display for ReviewError {
 
 impl std::error::Error for ReviewError {}
 
-/// Renders `document` into a `side × side` ink-evidence plane: longest side
-/// fitted, aspect preserved, centred, composited over `background`, then
-/// reduced to the distance from that background.
+/// The ink's bounding box in a plane, in pixels: `(x0, y0, x1, y1)` inclusive.
+///
+/// The threshold is the cascade's own [`INK_THRESHOLD`], so "the ink" means the
+/// same thing here as it does to the IoU and the chamfer distance.
+fn ink_box(plane: &[u8], w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for (index, value) in plane.iter().enumerate().take((w * h) as usize) {
+        if *value >= INK_THRESHOLD {
+            let (x, y) = (index as u32 % w, index as u32 / w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    (x0 != u32::MAX).then_some((x0, y0, x1, y1))
+}
+
+/// The ink-evidence plane of a render (see [`normalized_plane`]).
+///
+/// The rule is stage ⑧'s: composite the render over the background, then take
+/// the largest per-channel distance from it. A transparent pixel therefore
+/// scores 0 — the background is not ink.
+fn evidence_plane(pixmap: &resvg::tiny_skia::Pixmap, background: [u8; 4]) -> Vec<u8> {
+    pixmap
+        .data()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| {
+            let inv = 255 - u16::from(p[3]);
+            let mix = |c: u8, b: u8| u16::from(c) + (u16::from(b) * inv) / 255;
+            let ev = [
+                mix(p[0], background[0]).abs_diff(u16::from(background[0])),
+                mix(p[1], background[1]).abs_diff(u16::from(background[1])),
+                mix(p[2], background[2]).abs_diff(u16::from(background[2])),
+            ];
+            u8::try_from(ev.iter().max().copied().unwrap_or(0)).unwrap_or(255)
+        })
+        .collect()
+}
+
+/// Renders `area` (in document units) into a `canvas × canvas` ink-evidence
+/// plane: the area's longest side fitted, aspect preserved, centred.
+fn render_area(
+    tree: &resvg::usvg::Tree,
+    canvas: u32,
+    area: (f32, f32, f32, f32),
+    background: [u8; 4],
+    id: u32,
+) -> Result<Vec<u8>, ReviewError> {
+    let (ax, ay, aw, ah) = area;
+    let scale = canvas as f32 / aw.max(ah);
+    let (cw, ch) = (aw * scale, ah * scale);
+    let tx = (canvas as f32 - cw) / 2.0 - ax * scale;
+    let ty = (canvas as f32 - ch) / 2.0 - ay * scale;
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(canvas, canvas).ok_or_else(|| ReviewError::Render {
+            id,
+            reason: format!("{canvas}×{canvas} pixmap allocation failed"),
+        })?;
+    let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty);
+    resvg::render(tree, transform, &mut pixmap.as_mut());
+    Ok(evidence_plane(&pixmap, background))
+}
+
+/// Renders `document` into a `side × side` ink-evidence plane fitted to the
+/// icon's **ink box**: longest side scaled to fill the cell, aspect preserved,
+/// centred, composited over `background`, then reduced to the distance from
+/// that background.
 ///
 /// The plane is what every hash and distance in the cascade reads, so this is
-/// the single definition of "what this icon looks like" in the review.
+/// the single definition of "what this icon looks like" in the review. Fitting
+/// the ink (rather than the document, which is a crop) is what makes the
+/// comparison independent of the margin the trace happened to leave around the
+/// artwork — two copies of one logo must not stop being duplicates because one
+/// of them was cropped generously.
+///
+/// A document that draws nothing yields an all-zero plane rather than an error:
+/// no ink is not "identical to" another empty icon, and the caller decides
+/// whether a blank cell means anything (see [`crate::review_native`]'s cascade,
+/// which skips pairs it cannot compare).
 ///
 /// # Errors
 ///
@@ -282,40 +368,35 @@ pub fn normalized_plane(
         });
     }
     let canvas = side * SUPERSAMPLE;
-    // Fit the longest side; the shorter one follows, so a rectangle stays one.
-    let scale = canvas as f32 / w.max(h);
-    let (dw, dh) = (w * scale, h * scale);
-    let (tx, ty) = ((canvas as f32 - dw) / 2.0, (canvas as f32 - dh) / 2.0);
-    let mut pixmap =
-        resvg::tiny_skia::Pixmap::new(canvas, canvas).ok_or_else(|| ReviewError::Render {
-            id,
-            reason: format!("{canvas}×{canvas} pixmap allocation failed"),
-        })?;
-    let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
 
-    // Evidence plane, by the same rule stage ⑧ uses: composite the render over
-    // the background, then take the largest per-channel distance from it. A
-    // transparent pixel therefore scores 0 — the background is not ink.
-    let bg = background;
-    let plane: Vec<u8> = pixmap
-        .data()
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|p| {
-            let inv = 255 - u16::from(p[3]);
-            let mix = |c: u8, b: u8| u16::from(c) + (u16::from(b) * inv) / 255;
-            let ev = [
-                mix(p[0], bg[0]).abs_diff(u16::from(bg[0])),
-                mix(p[1], bg[1]).abs_diff(u16::from(bg[1])),
-                mix(p[2], bg[2]).abs_diff(u16::from(bg[2])),
-            ];
-            u8::try_from(ev.iter().max().copied().unwrap_or(0)).unwrap_or(255)
-        })
-        .collect();
-    // Supersampled: box-filter down to the cell the cascade works in.
-    crate::review::dupes::downscale_luma(&plane, canvas, canvas, side, side).ok_or_else(|| {
+    // Pass 1 — probe the document's own box to find where the ink is. The
+    // document is the caller's crop, so this box is not the icon; it is only
+    // the frame the ink is measured in.
+    let probe = render_area(&tree, canvas, (0.0, 0.0, w, h), background, id)?;
+    let Some((x0, y0, x1, y1)) = ink_box(&probe, canvas, canvas) else {
+        return Ok(vec![0; (side * side) as usize]);
+    };
+    // Probe pixels back to document units: the probe fitted the longest side,
+    // so one scale and one centring offset describe both axes. The box is grown
+    // by one pixel past the last ink pixel before the round trip, so rounding
+    // can only ever keep ink inside the cell, never cut it off.
+    let scale = canvas as f32 / w.max(h);
+    let tx = (canvas as f32 - w * scale) / 2.0;
+    let ty = (canvas as f32 - h * scale) / 2.0;
+    let doc = |px: u32, offset: f32| (px as f32 - offset) / scale;
+    let dx0 = doc(x0, tx);
+    let dy0 = doc(y0, ty);
+    let (dx1, dy1) = (doc(x1 + 1, tx), doc(y1 + 1, ty));
+
+    // Pass 2 — render that box into the cell, supersampled and box-filtered.
+    let cell = render_area(
+        &tree,
+        canvas,
+        (dx0, dy0, dx1 - dx0, dy1 - dy0),
+        background,
+        id,
+    )?;
+    crate::review::dupes::downscale_luma(&cell, canvas, canvas, side, side).ok_or_else(|| {
         ReviewError::Render {
             id,
             reason: "cell downscale failed".to_string(),

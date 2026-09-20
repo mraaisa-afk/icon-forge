@@ -314,7 +314,7 @@ fn g1_duplicates_are_found_and_not_invented() {
 fn g1b_the_cascade_holds_at_a_thousand_icons() {
     // Sixty-three copies of the sixteen traced documents: 1008 icons of real
     // geometry, which is the shape of the job the LSH exists for.
-    let (sheet, _mask, _groups, inputs, _truth) = traced("15_c9_duplicates", TracePreset::Balanced);
+    let (sheet, _mask, groups, inputs, truth) = traced("15_c9_duplicates", TracePreset::Balanced);
     let seg = SegParams::default();
     let background = review_background(&sheet, &seg);
     let copies = 63u32;
@@ -350,13 +350,23 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
     let (clusters, counts) = duplicate_cascade(&hash_items, &planes, &scores, &options);
     let cascade_ms = cascade_started.elapsed().as_secs_f64() * 1000.0;
 
-    // Ground truth: two icons are duplicates exactly when they came from the
-    // same traced document.
+    // Ground truth: two icons are duplicates exactly when they are the same
+    // artwork, which is what the corpus's own sidecar records — the same
+    // definition G1 uses, so the two tests cannot disagree about what a
+    // duplicate is. (Counting *document* copies instead would call four
+    // differently-sized copies of one shape "different", which is the opposite
+    // of what "near-duplicate" means here — and with the cell fitted to the
+    // ink, that is exactly the pair the cascade is expected to find.)
+    let shape_of_doc: BTreeMap<u32, String> = groups
+        .iter()
+        .zip(&inputs)
+        .map(|(group, input)| (input.id, truth_for(group, &truth).1))
+        .collect();
     let ids: Vec<u32> = hash_items.iter().map(|h| h.id).collect();
     let mut truth_pairs = BTreeSet::new();
     for (i, a) in ids.iter().enumerate() {
         for b in ids.iter().skip(i + 1) {
-            if group_of[a] == group_of[b] {
+            if shape_of_doc[&group_of[a]] == shape_of_doc[&group_of[b]] {
                 truth_pairs.insert((*a, *b));
             }
         }
@@ -380,7 +390,35 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
         "the LSH proposed {} pairs of a possible {all_pairs} — it must be a fraction of them",
         counts.candidates
     );
-    assert_eq!(clusters.len(), inputs.len(), "one cluster per document");
+    // Structure: one cluster per shape family, each holding every copy of every
+    // document of that shape — 4 families × 4 documents × 63 copies.
+    let shapes: BTreeSet<&String> = shape_of_doc.values().collect();
+    assert_eq!(
+        clusters.len(),
+        shapes.len(),
+        "one cluster per shape family, got {:?}",
+        clusters
+            .iter()
+            .map(|c| c.members.len())
+            .collect::<Vec<usize>>()
+    );
+    for cluster in &clusters {
+        let families: BTreeSet<&String> = cluster
+            .members
+            .iter()
+            .map(|id| &shape_of_doc[&group_of[id]])
+            .collect();
+        assert_eq!(
+            families.len(),
+            1,
+            "a cluster must not mix shapes: {families:?}"
+        );
+        assert_eq!(
+            cluster.members.len(),
+            (inputs.len() / shapes.len() as usize) * copies as usize,
+            "a shape family's cluster holds every copy of its documents"
+        );
+    }
     eprintln!(
         "evidence: phase6 G1b icons={n} papers={} clusters={} candidates={} (all-pairs would be \
          {all_pairs}, {:.2}% proposed) verify={} confirm={} recall={recall:.4} \
@@ -566,19 +604,34 @@ fn g3_outliers_find_the_icon_that_is_not_like_the_others() {
     );
 
     // --- 3. the roadmap's own example: a filled blob among outlines ---------
-    let mut with_blob = stats.clone();
-    let blob_id = 9999;
-    let stroke_median = median(&stats.iter().map(|s| s.stroke).collect::<Vec<f32>>());
-    with_blob.push(IconStat {
-        id: blob_id,
+    //
+    // §3.6's defect is *"99 icons are 2px outline, one is a filled blob"*, and
+    // the style flag is a **modal** test: a blob is only an outlier when the
+    // sheet's own icons are outlines. Sheet 12's icons are solid glyphs, so the
+    // same blob is not one there — which is a fact about the sheet, not a
+    // failure of the detector, so the modal class is asserted before the
+    // absence is.
+    let sheet12_modal = isg_native::review::modal_style(&stats);
+    assert_eq!(
+        sheet12_modal,
+        Some(StyleClass::Filled),
+        "sheet 12's icons are solid, so the modal class must be filled — otherwise the \n\
+         blob below would be judged against the wrong norm"
+    );
+    let blob = |id: u32, stroke: f32, fill_ratio: f32, palette: u64| IconStat {
+        id,
         ink_size: median(&stats.iter().map(|s| s.ink_size).collect::<Vec<f32>>()),
-        stroke: stroke_median * 3.0,
+        stroke,
         node_count: 4.0,
         colours: 1.0,
         solidity: 1.0,
-        fill_ratio: 0.95,
-        palette: stats[0].palette,
-    });
+        fill_ratio,
+        palette,
+    };
+    let stroke_median = median(&stats.iter().map(|s| s.stroke).collect::<Vec<f32>>());
+    let mut with_blob = stats.clone();
+    let blob_id = 9999;
+    with_blob.push(blob(blob_id, stroke_median * 3.0, 0.95, stats[0].palette));
     let with_blob_flags = scan_outliers(&with_blob, OUTLIER_Z);
     let blob_flags: Vec<OutlierKind> = with_blob_flags
         .iter()
@@ -586,22 +639,66 @@ fn g3_outliers_find_the_icon_that_is_not_like_the_others() {
         .map(|flag| flag.kind)
         .collect();
     assert!(
-        blob_flags.contains(&OutlierKind::Style),
-        "the filled blob must be flagged as a style outlier, got {blob_flags:?}"
-    );
-    assert!(
         blob_flags.contains(&OutlierKind::Stroke),
-        "the filled blob's stroke must be flagged too, got {blob_flags:?}"
+        "the blob's stroke is three times the sheet's median and must be flagged, got {blob_flags:?}"
     );
     assert_eq!(
         StyleClass::of(0.95),
         StyleClass::Filled,
         "the blob's fill ratio has to read as filled"
     );
+    // A blob among *outlines* is where style and palette mismatch are defined,
+    // so the sheet that produces them is the one with outlines: 03_rings_holes
+    // is 25 rings, traced and measured like any other sheet.
+    let (ring_sheet, ring_mask, _groups, ring_inputs, _truth) =
+        traced("03_rings_holes", TracePreset::Balanced);
+    let ring_options = ReviewOptions {
+        background: review_background(&ring_sheet, &seg),
+        ..ReviewOptions::default()
+    };
+    let ring_report = review_sheet(&ring_sheet, &ring_mask, &ring_inputs, &ring_options)
+        .expect("the review runs");
+    let mut outlines: Vec<IconStat> = ring_report.icons.iter().map(|icon| icon.stat).collect();
+    assert!(
+        outlines.iter().all(|stat| stat.fill_ratio < 0.5),
+        "the rings must read as outlines or this case proves nothing: {:?}",
+        outlines.iter().map(|s| s.fill_ratio).collect::<Vec<f32>>()
+    );
+    assert_eq!(
+        isg_native::review::modal_style(&outlines),
+        Some(StyleClass::Outline),
+        "the rings are the norm"
+    );
+    let modal_palette =
+        isg_native::review::modal_palette(&outlines).expect("one palette covers the rings");
+    outlines.push(blob(
+        blob_id,
+        stroke_median * 3.0,
+        0.95,
+        modal_palette ^ 0xFFFF,
+    ));
+    let roadmap_flags = scan_outliers(&outlines, OUTLIER_Z);
+    let roadmap_blob: Vec<OutlierKind> = roadmap_flags
+        .iter()
+        .filter(|flag| flag.id == blob_id)
+        .map(|flag| flag.kind)
+        .collect();
+    for kind in [
+        OutlierKind::Style,
+        OutlierKind::Palette,
+        OutlierKind::Stroke,
+    ] {
+        assert!(
+            roadmap_blob.contains(&kind),
+            "the roadmap's blob among {} outlines must be flagged {kind:?}, got {roadmap_blob:?}",
+            outlines.len() - 1
+        );
+    }
 
     eprintln!(
-        "evidence: phase6 G3 icons={} sheet_outliers={} ids={:?} injected_blob={:?} \
-         uniform_sheet_outliers=0 median_stroke={stroke_median:.2} (z threshold {OUTLIER_Z})",
+        "evidence: phase6 G3 icons={} sheet_outliers={} ids={:?} injected_blob_on_solid_sheet={:?} \
+         roadmap_blob_among_outlines={:?} uniform_sheet_outliers=0 median_stroke={stroke_median:.2} \
+         (z threshold {OUTLIER_Z})",
         report.icons.len(),
         report.outliers.len(),
         report
@@ -610,6 +707,7 @@ fn g3_outliers_find_the_icon_that_is_not_like_the_others() {
             .map(|flag| flag.id)
             .collect::<BTreeSet<u32>>(),
         blob_flags,
+        roadmap_blob,
     );
 }
 
@@ -707,13 +805,35 @@ fn g5_the_review_refuses_inputs_it_cannot_review() {
         h: 4,
     };
 
-    // A document the engine cannot parse.
+    // A document the engine cannot parse. Note the parser is lenient about
+    // absent geometry — `not svg` parses to *no shapes*, which §3.9 calls a
+    // `NoOp` import — so the malformed case has to be malformed path data.
+    let error = review_sheet(
+        &sheet,
+        &mask,
+        &[item("<svg><path d=\"M 0 0 L\"/></svg>", boxed)],
+        &options,
+    )
+    .expect_err("a document with malformed path data must be refused");
+    assert!(
+        matches!(
+            error,
+            isg_native::review_native::ReviewError::BadArtwork { id: 1, .. }
+        ),
+        "expected a bad-artwork refusal, got {error:?}"
+    );
+
+    // A document that parses but draws nothing, on a crop with no ink: the
+    // parser is happy, the mask is not — that is `NoInk`, not `BadArtwork`.
     let error = review_sheet(&sheet, &mask, &[item("not svg", boxed)], &options)
-        .expect_err("an unparseable document must be refused");
-    assert!(matches!(
-        error,
-        isg_native::review_native::ReviewError::BadArtwork { id: 1, .. }
-    ));
+        .expect_err("a document with no ink must be refused");
+    assert!(
+        matches!(
+            error,
+            isg_native::review_native::ReviewError::NoInk { id: 1 }
+        ),
+        "expected a no-ink refusal, got {error:?}"
+    );
 
     // A box that runs off the sheet.
     let off = Bbox {
