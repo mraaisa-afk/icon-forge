@@ -41,8 +41,8 @@ use isg_native::pipeline::{
     BackgroundKind, GroupingSession, SegParams, SheetRaster,
 };
 use isg_native::review::{
-    band_keys, confirm, median, node_budget, quality_flags, scan_outliers, verify, HashItem,
-    IconStat, OutlierKind, QualityFlag, QualityInput, StyleClass, TriageAction, TriageLog,
+    confirm, median, node_budget, quality_flags, scan_outliers, verify, HashItem, IconStat,
+    OutlierKind, QualityFlag, QualityInput, StyleClass, TriageAction, TriageLog,
     LOW_QUALITY_COMPOSITE, LSH_BANDS, OUTLIER_Z,
 };
 use isg_native::review_native::{
@@ -271,7 +271,9 @@ fn g1_duplicates_are_found_and_not_invented() {
     let planes: Vec<Vec<u8>> = inputs
         .iter()
         .map(|input| {
-            normalized_plane(&input.document, CELL, background, input.id)
+            // The same background the review itself was given, so the planes
+            // compared below are the ones the report's hashes came from.
+            normalized_plane(&input.document, CELL, options.background, input.id)
                 .unwrap_or_else(|e| panic!("icon {}: {e}", input.id))
         })
         .collect();
