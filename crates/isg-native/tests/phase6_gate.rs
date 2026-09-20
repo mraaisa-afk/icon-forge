@@ -351,6 +351,56 @@ fn g1_duplicates_are_found_and_not_invented() {
         report.cascade.verified,
         report.cascade.confirmed
     );
+
+    // A pair of same-shape icons that lands in different buckets, or fails the
+    // IoU it should pass, is only explainable by looking at the cell itself. The
+    // map below is 16 × 16 blocks of the 64 × 64 plane, each shown as the
+    // *largest* evidence in its block: `0` is background, `f` is full ink, and
+    // the grid is coarse enough that a ring's hole is visible at a glance.
+    for (index, input) in inputs.iter().enumerate() {
+        let icon = &report.icons[index];
+        let plane = &planes[index];
+        let (mut ink, mut x0, mut y0, mut x1, mut y1) = (0u32, u32::MAX, u32::MAX, 0u32, 0u32);
+        for (offset, value) in plane.iter().enumerate() {
+            if *value >= 128 {
+                ink += 1;
+                let (x, y) = (offset as u32 % CELL, offset as u32 / CELL);
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+        eprintln!(
+            "evidence: phase6 G1 icon id={} shape={} bbox={}x{} ink={} box=({x0},{y0})-({x1},{y1}) \
+             fill={:.3} stroke={:.1} nodes={} closed={} hash={:016x}/{:016x}",
+            input.id,
+            shape_of[&input.id],
+            input.bbox.w,
+            input.bbox.h,
+            ink,
+            icon.stat.fill_ratio,
+            icon.stat.stroke,
+            icon.node_count,
+            icon.closed,
+            icon.d_hash,
+            icon.a_hash,
+        );
+        for by in 0..16u32 {
+            let mut row = String::new();
+            for bx in 0..16u32 {
+                let mut best = 0u8;
+                for dy in 0..4u32 {
+                    for dx in 0..4u32 {
+                        best = best.max(plane[((by * 4 + dy) * CELL + bx * 4 + dx) as usize]);
+                    }
+                }
+                row.push(char::from_digit(u32::from(best >> 4), 16).unwrap_or('?'));
+            }
+            eprintln!("evidence: phase6 G1 map {} {row}", input.id);
+        }
+    }
+
     // The LSH is the one stage whose answer is a *set of buckets* rather than a
     // measurement, so a pair lost before `verify` can never be recovered by a
     // better threshold. A probe radius widens a bucket to its near neighbours;
