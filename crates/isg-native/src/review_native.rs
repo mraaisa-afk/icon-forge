@@ -113,6 +113,10 @@ pub struct IconReview {
     pub closed: bool,
     /// Distinct colours in the traced artwork.
     pub colours: u32,
+    /// Ink area in pixels, from the §3.5 mask metrics — the number the node
+    /// budget `4·√area` is computed from, kept here so a caller checking a flag
+    /// does not have to re-measure the mask.
+    pub ink_area: u64,
     /// The per-icon numbers the outlier detector read.
     pub stat: IconStat,
     /// dHash of the normalised cell.
@@ -511,11 +515,14 @@ pub fn review_sheet(
             fill_ratio,
             palette: palette_hash(&artwork),
         };
+        // `measure` counts in `u32`; the review's records are `u64` so a caller
+        // can sum them across a sheet without a cast at every use.
+        let ink_area = u64::from(metrics.ink_area);
         let flags = quality_flags(&QualityInput {
             id: item.id,
             composite: score.composite,
             node_count,
-            ink_area: metrics.ink_area,
+            ink_area,
             closed,
         });
         if !flags.is_empty() {
@@ -545,6 +552,7 @@ pub fn review_sheet(
             node_count,
             closed,
             colours,
+            ink_area,
             stat,
             d_hash,
             a_hash,

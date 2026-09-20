@@ -52,9 +52,12 @@ use isg_native::review_native::{
 use serde::Deserialize;
 
 /// One entry of a corpus truth sidecar (`bench/corpus/*.json`).
+///
+/// Only the two fields this gate reads: the sidecar's `id` is its own
+/// numbering, and the mapping below is by geometry, so a gate that trusted the
+/// numbering would be trusting the thing it is trying to verify.
 #[derive(Debug, Deserialize)]
 struct TruthIcon {
-    id: u32,
     shape: String,
     bbox: [u32; 4],
 }
@@ -70,9 +73,10 @@ impl TruthIcon {
     }
 
     fn centre(&self) -> (i64, i64) {
+        let rect = self.bbox();
         (
-            i64::from(self.bbox[0] + self.bbox[2] / 2),
-            i64::from(self.bbox[1] + self.bbox[3] / 2),
+            i64::from(rect.x + rect.w / 2),
+            i64::from(rect.y + rect.h / 2),
         )
     }
 }
@@ -422,7 +426,7 @@ fn g2_the_quality_flags_mean_what_section_36_says() {
                     icon.score.composite
                 ),
                 QualityFlag::OverComplex => assert!(
-                    f64::from(icon.node_count) > f64::from(node_budget(icon.stat.ink_area as u64)),
+                    f64::from(icon.node_count) > f64::from(node_budget(icon.ink_area)),
                     "icon {} is flagged over-complex at {} nodes",
                     icon.id,
                     icon.node_count
