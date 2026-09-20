@@ -15,6 +15,8 @@
 //!   clean → grouping → quantize → trace → simplify → emit → score,
 //!   batched sheet-wide through the content-addressed cache)
 //! * [`project`] — atomic `.isgproj` save/open (kill-safe by construction)
+//! * [`review`] — §3.6 review system: quality flags, the duplicate cascade,
+//!   MAD outliers and the triage log (pure arithmetic, like `sheet`)
 //! * [`jobs`] — T0/T1/T2 job engine with cancellation and preemption
 //! * [`sheet`] — §3.5 sheet generation: grid layout, auto-leveling, metadata
 //!   derivation and the SVG/PDF/PNG/CSV exporters (the arithmetic half is
@@ -32,6 +34,7 @@ pub mod import;
 pub mod jobs;
 pub mod pipeline;
 pub mod project;
+pub mod review;
 pub mod rss;
 pub mod sheet;
 pub mod sheet_native;
