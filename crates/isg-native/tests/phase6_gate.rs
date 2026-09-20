@@ -41,9 +41,9 @@ use isg_native::pipeline::{
     BackgroundKind, GroupingSession, SegParams, SheetRaster,
 };
 use isg_native::review::{
-    median, node_budget, quality_flags, scan_outliers, HashItem, IconStat, OutlierKind,
-    QualityFlag, QualityInput, StyleClass, TriageAction, TriageLog, LOW_QUALITY_COMPOSITE,
-    LSH_BANDS, OUTLIER_Z,
+    band_keys, confirm, median, node_budget, quality_flags, scan_outliers, verify, HashItem,
+    IconStat, OutlierKind, QualityFlag, QualityInput, StyleClass, TriageAction, TriageLog,
+    LOW_QUALITY_COMPOSITE, LSH_BANDS, OUTLIER_Z,
 };
 use isg_native::review_native::{
     duplicate_cascade, normalized_plane, plane_digest, review_sheet, upscale_nearest, ReviewInput,
@@ -262,6 +262,142 @@ fn g1_duplicates_are_found_and_not_invented() {
         }
         pairs
     };
+
+    // --- where the cascade loses a true pair -------------------------------
+    // Recall is a claim about four stages, so when it comes up short the next
+    // question is always *which* stage dropped the pair — propose (the LSH
+    // buckets), verify (IoU / Hausdorff) or confirm (digest / SSIM). Answering
+    // that from a second run costs ten minutes; printing it here costs nothing.
+    let planes: Vec<Vec<u8>> = inputs
+        .iter()
+        .map(|input| {
+            normalized_plane(&input.document, CELL, background, input.id)
+                .unwrap_or_else(|e| panic!("icon {}: {e}", input.id))
+        })
+        .collect();
+    let items: Vec<HashItem> = inputs
+        .iter()
+        .zip(&planes)
+        .map(|(input, plane)| HashItem {
+            id: input.id,
+            d: isg_native::review::d_hash(plane, CELL, CELL).unwrap_or(0),
+            a: isg_native::review::a_hash(plane, CELL, CELL).unwrap_or(0),
+            digest: plane_digest(plane),
+        })
+        .collect();
+    let index_of: BTreeMap<u32, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.id, index))
+        .collect();
+    // The review's own report must agree with these planes, or the diagnostic
+    // below is describing something other than what ran.
+    for (icon, item) in report.icons.iter().zip(&items) {
+        assert_eq!(
+            (icon.id, icon.d_hash, icon.digest),
+            (item.id, item.d, item.digest),
+            "the report's hashes must be the ones these planes produce"
+        );
+    }
+    let proposed: BTreeSet<(u32, u32)> = isg_native::review::candidate_pairs(&items, LSH_BANDS)
+        .iter()
+        .map(|(a, b)| (items[*a].id, items[*b].id))
+        .collect();
+    let mut stages = [0usize; 4]; // true pairs, proposed, verified, confirmed
+    let mut lost: Vec<String> = Vec::new();
+    for (a, b) in &truth_pairs {
+        stages[0] += 1;
+        let (ia, ib) = (index_of[a], index_of[b]);
+        let (pa, pb) = (&planes[ia], &planes[ib]);
+        let is_candidate = proposed.contains(&(*a, *b)) || proposed.contains(&(*b, *a));
+        let verified = verify(pa, pb, CELL, CELL, &options.dupes);
+        let score = compare_planes(pa, pb, CELL, CELL);
+        let confirmed = confirm(
+            &plane_digest(pa),
+            &plane_digest(pb),
+            f64::from(score.ssim),
+            &options.dupes,
+        );
+        if is_candidate {
+            stages[1] += 1;
+        }
+        if is_candidate && verified.is_some_and(|v| v.pass) {
+            stages[2] += 1;
+        }
+        if is_candidate && verified.is_some_and(|v| v.pass) && confirmed {
+            stages[3] += 1;
+            continue;
+        }
+        lost.push(format!(
+            "{a}-{b} cand={is_candidate} verify={:?} iou={:.3} haus={:.4} ssim={:.4} bits(d/a)={}/{}",
+            verified.map(|v| v.pass),
+            score.iou,
+            verified.map_or(f32::NAN, |v| v.hausdorff),
+            score.ssim,
+            (items[ia].d ^ items[ib].d).count_ones(),
+            (items[ia].a ^ items[ib].a).count_ones(),
+        ));
+    }
+    eprintln!(
+        "evidence: phase6 G1 funnel true={} proposed={} verified={} confirmed={} \
+         cascade=propose {} / verify {} / confirm {}",
+        stages[0],
+        stages[1],
+        stages[2],
+        stages[3],
+        report.cascade.candidates,
+        report.cascade.verified,
+        report.cascade.confirmed
+    );
+    // The LSH is the one stage whose answer is a *set of buckets* rather than a
+    // measurement, so a pair lost before `verify` can never be recovered by a
+    // better threshold. A probe radius widens a bucket to its near neighbours;
+    // the counts below say what each radius would cost (pairs proposed, of 120)
+    // and what it would buy (true pairs reached).
+    let band_set = |item: &HashItem, radius: u32| -> BTreeSet<(u32, u64)> {
+        let mut keys = BTreeSet::new();
+        for hash in [item.d, item.a] {
+            for (band, key) in isg_native::review::band_keys(hash, LSH_BANDS) {
+                keys.insert((band, key));
+                if radius >= 1 {
+                    for bit in 0..16 {
+                        keys.insert((band, key ^ (1u64 << bit)));
+                    }
+                }
+                if radius >= 2 {
+                    for a in 0..16 {
+                        for b in (a + 1)..16 {
+                            keys.insert((band, key ^ (1u64 << a) ^ (1u64 << b)));
+                        }
+                    }
+                }
+            }
+        }
+        keys
+    };
+    for radius in 0..=2u32 {
+        let sets: Vec<BTreeSet<(u32, u64)>> =
+            items.iter().map(|item| band_set(item, radius)).collect();
+        let (mut proposed_pairs, mut caught) = (0usize, 0usize);
+        for (i, set) in sets.iter().enumerate() {
+            for (j, other) in sets.iter().enumerate().skip(i + 1) {
+                if set.intersection(other).next().is_some() {
+                    proposed_pairs += 1;
+                    if truth_pairs.contains(&(items[i].id, items[j].id)) {
+                        caught += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "evidence: phase6 G1 probe radius={radius} proposed={proposed_pairs}/120 \
+             true_caught={caught}/{}",
+            truth_pairs.len()
+        );
+    }
+    for line in &lost {
+        eprintln!("evidence: phase6 G1 lost {line}");
+    }
 
     let predicted = cluster_pairs(&report.clusters);
     let (recall, precision) = scores_of(&predicted, &truth_pairs);
@@ -647,30 +783,47 @@ fn g3_outliers_find_the_icon_that_is_not_like_the_others() {
         StyleClass::Filled,
         "the blob's fill ratio has to read as filled"
     );
-    // A blob among *outlines* is where style and palette mismatch are defined,
-    // so the sheet that produces them is the one with outlines: 03_rings_holes
-    // is 25 rings, traced and measured like any other sheet.
-    let (ring_sheet, ring_mask, _groups, ring_inputs, _truth) =
-        traced("03_rings_holes", TracePreset::Balanced);
-    let ring_options = ReviewOptions {
-        background: review_background(&ring_sheet, &seg),
+    // Style and palette are *modal* tests, so the sheet that produces them is
+    // one whose icons really are outlines. `03_rings_holes` is not: a ring's
+    // fill ratio is `4t(D − t) / D²`, and the corpus draws thick rings — the
+    // measured values are 0.44…0.63, which the classifier calls *filled* from
+    // 0.5 up. `07_size_range` is one of each shape, so its thinnest icon is a
+    // real, measured, traced outline; §3.6's sentence — *"99 icons are 2px
+    // outline, one is a filled blob"* — is then taken at its word, one measured
+    // outline repeated and one blob beside it.
+    let (thin_sheet, thin_mask, _groups, thin_inputs, _truth) =
+        traced("07_size_range", TracePreset::Balanced);
+    let thin_options = ReviewOptions {
+        background: review_background(&thin_sheet, &seg),
         ..ReviewOptions::default()
     };
-    let ring_report = review_sheet(&ring_sheet, &ring_mask, &ring_inputs, &ring_options)
+    let thin_report = review_sheet(&thin_sheet, &thin_mask, &thin_inputs, &thin_options)
         .expect("the review runs");
-    let mut outlines: Vec<IconStat> = ring_report.icons.iter().map(|icon| icon.stat).collect();
+    let outline = thin_report
+        .icons
+        .iter()
+        .map(|icon| icon.stat)
+        .min_by(|a, b| a.fill_ratio.total_cmp(&b.fill_ratio))
+        .expect("sheet 07 has icons");
     assert!(
-        outlines.iter().all(|stat| stat.fill_ratio < 0.5),
-        "the rings must read as outlines or this case proves nothing: {:?}",
-        outlines.iter().map(|s| s.fill_ratio).collect::<Vec<f32>>()
+        StyleClass::of(outline.fill_ratio) == StyleClass::Outline,
+        "sheet 07's thinnest icon fills {:.3} of its box, so it is not an outline and this case \
+         proves nothing",
+        outline.fill_ratio
     );
+    let mut outlines: Vec<IconStat> = (0..99)
+        .map(|index| IconStat {
+            id: index + 1,
+            ..outline
+        })
+        .collect();
     assert_eq!(
         isg_native::review::modal_style(&outlines),
         Some(StyleClass::Outline),
-        "the rings are the norm"
+        "99 identical outlines are the norm on this sheet"
     );
     let modal_palette =
-        isg_native::review::modal_palette(&outlines).expect("one palette covers the rings");
+        isg_native::review::modal_palette(&outlines).expect("one palette covers the outlines");
     outlines.push(blob(
         blob_id,
         stroke_median * 3.0,
@@ -683,11 +836,10 @@ fn g3_outliers_find_the_icon_that_is_not_like_the_others() {
         .filter(|flag| flag.id == blob_id)
         .map(|flag| flag.kind)
         .collect();
-    for kind in [
-        OutlierKind::Style,
-        OutlierKind::Palette,
-        OutlierKind::Stroke,
-    ] {
+    // The numeric kinds are pinned by the sheet-12 case above, where the sheet
+    // has spread; with 99 identical outlines the spread is zero by construction,
+    // so what this case can prove is the two modal kinds.
+    for kind in [OutlierKind::Style, OutlierKind::Palette] {
         assert!(
             roadmap_blob.contains(&kind),
             "the roadmap's blob among {} outlines must be flagged {kind:?}, got {roadmap_blob:?}",
