@@ -178,10 +178,12 @@ fn a_session_survives_a_reopen_with_its_states_and_its_journal() {
     let rows = lib
         .review_log_for(&log_key(&SHEET))
         .expect("the session's journal");
+    // Each decision is one event and the undo is another: an undo takes a
+    // decision back, it does not erase the record of it.
     assert_eq!(
         rows.len(),
-        4,
-        "three decisions and the undo that took one back"
+        5,
+        "four decisions and the undo that took one back"
     );
     assert!(
         rows.iter().all(|row| row.action.starts_with("review/")),
@@ -204,7 +206,7 @@ fn a_session_survives_a_reopen_with_its_states_and_its_journal() {
     let before = session.log.clone();
     let decisions_before = states_of(&lib, SHEET);
     drop(lib);
-    let lib = Library::open(&db).expect("the project reopens");
+    let mut lib = Library::open(&db).expect("the project reopens");
     let reloaded = session_for(SHEET, ids_of(&lib, SHEET), &lib).expect("the journal");
     assert_eq!(reloaded.log, before, "the journal is the session's memory");
     assert_eq!(
