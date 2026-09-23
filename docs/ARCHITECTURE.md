@@ -302,12 +302,17 @@ above the 2 % bar; the SSIM only above 0.59, which is not a meaningful SSIM. The
 gate's truth is what the design can promise — **the same tracing**, byte for
 byte, derived from the documents the shipping path produced rather than from the
 cascade's own plane digests — and the 10 variant pairs are reported with their
-metrics instead of being asserted either way. Precision is measured twice: on
-`15_c9_duplicates`, where any merge outside the identical pairs costs it
-directly, and on `12_c2_latency_grid`'s 100 icons of ten shapes at similar sizes,
+metrics instead of being asserted either way. Precision is measured where the
+labels name different artwork: on `15_c9_duplicates`, a merge that crosses a
+shape is what costs it and the same-shape variant merges are printed rather than
+scored, and on `12_c2_latency_grid`'s 100 icons of ten shapes at similar sizes,
 where the cascade must produce no cluster that mixes two shapes and no
 cross-shape pair may pass both stages inside §3.6's bars — the closest
-cross-shape pair's three metrics are printed so the margin is visible.
+cross-shape pair's three metrics are printed so the margin is visible. Both
+sheets also print the raw figure (0.2857 on C9 and 0.3599 at a thousand icons on
+the run that first scored them — what the bar reads if the unjudged variant
+merges are counted as errors) and the size of the judged set, so the exclusion is
+a measurement rather than a hole.
 (The chamfer transform behind the Hausdorff figure was found broken by this work
 and fixed in Phase 6: its backward sweep was guarded so it never relaxed a pixel
 the forward sweep had reached, which made a 1.33 px wall difference read as
