@@ -304,13 +304,19 @@ fn chamfer_distance(plane: &[u8], w: u32, h: u32) -> Vec<f32> {
             dt[index] = best;
         }
     }
-    // Backward pass: south, east and the two diagonals ahead.
+    // Backward pass: south, east and the two diagonals ahead. **Every** pixel is
+    // relaxed here, not only the ones the forward pass could not reach: the
+    // forward sweep only sees paths arriving from the north-west, so a pixel
+    // whose nearest ink lies to the south-east keeps its detour value unless
+    // this pass is allowed to improve it. Guarding this pass with
+    // `is_infinite()` — which is what this was — leaves the transform exact only
+    // for a shape shifted the way the forward sweep can see, and wildly wrong
+    // everywhere else: two 64-cell rings whose walls differ by 0.2 px measured
+    // **17 px** apart, so no icon pair carrying a real size jitter could ever
+    // pass the Hausdorff arm of the verify stage.
     for y in (0..h).rev() {
         for x in (0..w).rev() {
             let index = y * w + x;
-            if !dt[index].is_infinite() {
-                continue;
-            }
             let mut best = dt[index];
             if y + 1 < h {
                 best = best.min(dt[(y + 1) * w + x] + 1.0);
@@ -608,6 +614,70 @@ mod tests {
             hausdorff_normalised(&half_plane(), &half_plane(), 64, 64),
             Some(0.0)
         );
+    }
+
+    /// A 64×64 ring of the given wall thickness, fitted to the cell (outer
+    /// radius 32) — the shape the corpus's C9 sheet draws four of.
+    fn ring(wall: f32) -> Vec<u8> {
+        let mut plane = vec![0u8; 64 * 64];
+        for y in 0..64 {
+            for x in 0..64 {
+                let dx = x as f32 + 0.5 - 32.0;
+                let dy = y as f32 + 0.5 - 32.0;
+                let r = (dx * dx + dy * dy).sqrt();
+                if r <= 32.0 && r >= 32.0 - wall {
+                    plane[y * 64 + x] = 255;
+                }
+            }
+        }
+        plane
+    }
+
+    #[test]
+    fn hausdorff_sees_a_thin_wall_as_thin() {
+        // Two rings of the same outer diameter whose walls differ by what the
+        // corpus's own jitter produces (6 px and 7 px on a 48 px ring, i.e.
+        // 8 px and 9.33 px once fitted to the cell). The geometric distance
+        // between the two is that wall difference and nothing else: 1.33 px
+        // over the 64×64 diagonal.
+        //
+        // Measured, the symmetric distance is **2.00 px** (0.0221): the extra
+        // ~0.7 px over the geometric figure is the staircase floor — the two
+        // ideal circles are rasterised onto the same pixel grid, and where one
+        // boundary steps and the other does not, the discrete distance is one
+        // pixel more than the continuous one. That floor is why §3.6's 2 % bar
+        // is a tolerance on *shape* and not on *rasterisation*, and why the
+        // gate reports it: a fitted 1.33 px wall difference is 2.00 px by this
+        // metric, so the pair's verdict here is decided by the IoU arm.
+        //
+        // This test exists to pin the transform, not to bless the number: before
+        // the backward sweep was fixed it read ~17 px (0.19) for this pair —
+        // large enough to reject every icon carrying a size jitter — so a
+        // regression that re-breaks the sweep must land far outside the band
+        // asserted here.
+        let (thin, thick) = (ring(8.0), ring(9.33));
+        let d = hausdorff_normalised(&thin, &thick, 64, 64).expect("both have ink");
+        let diagonal = (64f32 * 64.0 + 64.0 * 64.0).sqrt();
+        let pixels = d * diagonal;
+        assert!(
+            (1.3..=2.2).contains(&pixels),
+            "a 1.33 px wall difference must read as a couple of pixels, got {pixels:.2} px ({d})"
+        );
+        assert!(
+            d < 0.03,
+            "a thin wall difference reads as {pixels:.2} px — the one-pass chamfer's {:.2} px \
+             regression is back",
+            17.0
+        );
+        // The same plane against itself is exactly zero, hole and all: the
+        // hole's far wall is 1000s of pixels from the near wall, and only a
+        // correct two-pass transform gets zero here.
+        assert_eq!(hausdorff_normalised(&thin, &thin, 64, 64), Some(0.0));
+        // Nesting does not hide it: the thicker ring's inner wall sits 1.33 px
+        // inside the thinner one's, so the IoU is not 1 either — verify's other
+        // arm cannot quietly rescue the pair.
+        let iou = ink_iou(&thin, &thick, 64, 64).expect("both have ink");
+        assert!(iou < 0.92, "expected the ioU arm to fail, got {iou}");
     }
 
     #[test]

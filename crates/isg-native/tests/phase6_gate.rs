@@ -340,6 +340,38 @@ fn g1_duplicates_are_found_and_not_invented() {
             (items[ia].a ^ items[ib].a).count_ones(),
         ));
     }
+    // --- what the bars would have to be -------------------------------------
+    // The exit criterion's two numbers mean nothing without the distributions
+    // they separate, so here they are: the worst *true* pair (same artwork) and
+    // the best *false* one (different artwork), per metric. §3.6's bounds are
+    // printed beside them, which is what says whether a bound is inside the gap
+    // or on the wrong side of it — the question a reviewer has to answer before
+    // any of these three numbers is changed.
+    let (mut worst_iou, mut worst_haus, mut worst_ssim) = (f32::MAX, 0.0f32, f32::MAX);
+    let (mut best_iou, mut best_haus, mut best_ssim) = (0.0f32, f32::MAX, 0.0f32);
+    for (i, a) in items.iter().enumerate() {
+        for b in items.iter().skip(i + 1) {
+            let (pa, pb) = (&planes[index_of[&a.id]], &planes[index_of[&b.id]]);
+            let iou = isg_native::review::ink_iou(pa, pb, CELL, CELL).unwrap_or(0.0);
+            let haus = isg_native::review::hausdorff_normalised(pa, pb, CELL, CELL).unwrap_or(1.0);
+            let ssim = compare_planes(pa, pb, CELL, CELL).ssim;
+            if shape_of[&a.id] == shape_of[&b.id] {
+                worst_iou = worst_iou.min(iou);
+                worst_haus = worst_haus.max(haus);
+                worst_ssim = worst_ssim.min(ssim);
+            } else {
+                best_iou = best_iou.max(iou);
+                best_haus = best_haus.min(haus);
+                best_ssim = best_ssim.max(ssim);
+            }
+        }
+    }
+    eprintln!(
+        "evidence: phase6 G1 separation worst_true(iou={worst_iou:.3} haus={worst_haus:.4} \
+         ssim={worst_ssim:.4}) best_false(iou={best_iou:.3} haus={best_haus:.4} \
+         ssim={best_ssim:.4}) bars(iou>={:.2} haus<={:.3} ssim>={:.2})",
+        options.dupes.iou_min, options.dupes.hausdorff_max, options.dupes.ssim_min
+    );
     eprintln!(
         "evidence: phase6 G1 funnel true={} proposed={} verified={} confirmed={} \
          cascade=propose {} / verify {} / confirm {}",
@@ -352,11 +384,11 @@ fn g1_duplicates_are_found_and_not_invented() {
         report.cascade.confirmed
     );
 
-    // A pair of same-shape icons that lands in different buckets, or fails the
-    // IoU it should pass, is only explainable by looking at the cell itself. The
-    // map below is 16 × 16 blocks of the 64 × 64 plane, each shown as the
-    // *largest* evidence in its block: `0` is background, `f` is full ink, and
-    // the grid is coarse enough that a ring's hole is visible at a glance.
+    // A pair of same-shape icons that fails a metric is only explainable beside
+    // the cell those metrics were taken on, so each icon's cell is summarised:
+    // how much ink it holds, where that ink sits, and the numbers the detectors
+    // derived from it. Two icons of one artwork whose ink counts differ are two
+    // different tracings, however close their hashes look.
     for (index, input) in inputs.iter().enumerate() {
         let icon = &report.icons[index];
         let plane = &planes[index];
@@ -386,19 +418,6 @@ fn g1_duplicates_are_found_and_not_invented() {
             icon.d_hash,
             icon.a_hash,
         );
-        for by in 0..16u32 {
-            let mut row = String::new();
-            for bx in 0..16u32 {
-                let mut best = 0u8;
-                for dy in 0..4u32 {
-                    for dx in 0..4u32 {
-                        best = best.max(plane[((by * 4 + dy) * CELL + bx * 4 + dx) as usize]);
-                    }
-                }
-                row.push(char::from_digit(u32::from(best >> 4), 16).unwrap_or('?'));
-            }
-            eprintln!("evidence: phase6 G1 map {} {row}", input.id);
-        }
     }
 
     // The LSH is the one stage whose answer is a *set of buckets* rather than a
