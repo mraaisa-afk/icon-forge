@@ -326,6 +326,8 @@ the forward sweep had reached, which made a 1.33 px wall difference read as
 
 **The triage log is state, not a list.** At most one decision per icon, each timestamped and sequence-numbered; `undo` restores *the decision it replaced* (a flag that was then rejected goes back to flagged, not to undecided); sequence numbers never go backwards, so `review.csv` is stable and its rows are chronological regardless of the ids. The export round-trips through the sheet module's own `parse_csv`. An imported log deliberately has no undo history: the keystrokes that produced the file are not in it.
 
+**The log is rebuilt from a journal, so triage survives a restart.** Every decision and every undo is appended to `review_log` as an event — `review/apply action=<name> index=<row> seq=<n> at=<ms>` or `review/undo at=<ms>` — filed under a 17-byte key (`0x52` then the sheet id), which no 16-byte icon id can equal: one sheet's session and its own icons' audit rows share the table without ever sharing a key. Loading a session replays that sheet's events through the same `TriageLog` the live pass used, and *verifies* each event's recorded sequence number against the number the replay hands out — a journal that does not reproduce its own numbering is reported as corruption rather than replayed into a plausible-looking log. Undo is an event like any other, so a session that closed mid-review reopens with the same decisions *and* the same undo stack, and the icon's `review_state` column is written in the same step (a decision sets it; an undo restores what the replaced decision had put there, or `pending`).
+
 **The quality composite comes from stage ⑧ at 2× cell.** `LowQuality` is defined on the composite, so the review calls `score_svg` — the sheet's real crop at 2× cell against the icon's own document — rather than re-deriving the metric at another scale, which would let the review panel disagree with the score the user already sees next to the same icon. `OverComplex` compares the outline's segment count against `4·√ink-area`, and an icon with no ink is never over-complex (its budget is zero).
 
 ---
@@ -373,8 +375,9 @@ CREATE TABLE cache (
 
 CREATE TABLE review_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    icon_id       BLOB NOT NULL,
-    action        TEXT NOT NULL,      -- approve|reject|flag|duplicate|undo
+    icon_id       BLOB NOT NULL,      -- a 16-byte icon id, or 0x52||sheet id for a session
+    action        TEXT NOT NULL,      -- approve|reject|flag|duplicate|undo, or a
+                                      -- review/apply|review/undo session event (see §3.6)
     timestamp     TEXT NOT NULL
 );
 ```

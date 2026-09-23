@@ -50,7 +50,7 @@ use std::time::Instant;
 use isg_core::{Bbox, ForegroundMask, IconGroup, TracePreset};
 use isg_native::pipeline::{
     compare_planes, emit_svg, mask_cached, normalize, score_svg, validate, vectorize_icon,
-    BackgroundKind, GroupingSession, SegParams, SheetRaster,
+    GroupingSession, SegParams, SheetRaster,
 };
 use isg_native::review::{
     confirm, median, node_budget, quality_flags, scan_outliers, verify, HashItem, IconStat,
@@ -146,11 +146,11 @@ fn grouped(name: &str, seg: &SegParams) -> (ForegroundMask, Vec<IconGroup>) {
 /// that cost run 35231648156 in stage ⑧). Both corpus families here are drawn
 /// on white.
 fn review_background(sheet: &SheetRaster, seg: &SegParams) -> [u8; 4] {
-    let model = isg_native::pipeline::background::detect_background(sheet, seg);
-    match model.kind {
-        BackgroundKind::Otsu | BackgroundKind::Alpha => [255, 255, 255, 255],
-        _ => model.rgba,
-    }
+    // The mapping lives in the library so the host commands cannot composite
+    // against a different background than this gate measures.
+    isg_native::review_native::review_background(
+        &isg_native::pipeline::background::detect_background(sheet, seg),
+    )
 }
 
 /// Traces every group of a sheet through the shipping path: the review's input

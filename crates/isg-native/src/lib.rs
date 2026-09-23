@@ -37,6 +37,7 @@ pub mod jobs;
 pub mod pipeline;
 pub mod project;
 pub mod review;
+pub mod review_host;
 pub mod review_native;
 pub mod rss;
 pub mod sheet;

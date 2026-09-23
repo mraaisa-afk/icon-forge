@@ -16,6 +16,8 @@ use isg_native::pipeline::{
     GroupingSession, PreviewImage, RefineParams, SegParams, SensitivityError, SensitivityParams,
     VectorizeError, WarningKind,
 };
+use isg_native::review_host::{host_inputs, host_review};
+use isg_native::review_native::{review_background, ReviewOptions};
 use isg_native::sheet::export::{
     artwork_file, artwork_from_svg, derive_row, expand_pattern, grid_position, parse_csv, slugify,
     write_csv, write_sheet_pdf, write_sheet_svg, Artwork, Column, CsvOptions, IconMeta,
@@ -26,6 +28,10 @@ use isg_native::sheet::{measure, IconInput, SheetPlan, SheetSpec};
 use isg_native::sheet_native::{render_sheet_png, validate_sheet_svg, RasterOptions};
 
 use crate::jobs::{cache_dir_for, ImportJob, VectorizeSheetJob};
+use crate::review_cmds::{
+    apply_decision, export, session_for, undo_decision, ReviewOut, ReviewSession, TriageActionDto,
+    TriageStateOut,
+};
 use crate::state::App;
 
 /// Serializable error for the webview (`Result<T, CmdError>` in JS).
@@ -37,6 +43,14 @@ pub struct CmdError {
 
 impl From<isg_native::IsgError> for CmdError {
     fn from(e: isg_native::IsgError) -> Self {
+        CmdError {
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<isg_native::review_native::ReviewError> for CmdError {
+    fn from(e: isg_native::review_native::ReviewError) -> Self {
         CmdError {
             message: e.to_string(),
         }
@@ -1787,6 +1801,208 @@ fn parse_hex_color(text: &str) -> Option<[u8; 4]> {
     Some([bytes[0], bytes[1], bytes[2], 255])
 }
 
+/// The review session over one sheet's rows, rebuilt from the triage journal.
+///
+/// The journal — not a cache held in this process — is the session's memory, so
+/// a sheet reviewed in an earlier run of the app reloads with its decisions and
+/// its undo stack intact (see [`crate::review_cmds`]).
+fn review_session(lib: &Library, sheet: [u8; 16]) -> CmdResult<ReviewSession> {
+    let rows = lib.icons_for_sheet(&sheet)?;
+    let icons = rows.iter().map(|row| row.id).collect::<Vec<[u8; 16]>>();
+    Ok(session_for(sheet, icons, lib)?)
+}
+
+/// What an undo changed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoDto {
+    /// The triage state after the undo.
+    pub triage: TriageStateOut,
+    /// 32-char hex of the icon whose decision was undone.
+    pub icon: String,
+}
+
+/// The review pass's export request.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewExportRequest {
+    /// The sheet to export.
+    pub sheet_id: String,
+    /// Directory to write `review-<sheet>.csv` into. Omitted (or empty) returns
+    /// the CSV without touching the disk, which is what a preview needs.
+    #[serde(default)]
+    pub out_dir: Option<String>,
+}
+
+/// `review.csv` and where it landed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewExportDto {
+    /// The CSV text, exactly as written.
+    pub csv: String,
+    /// How many decisions it holds.
+    pub decisions: u32,
+    /// The next sequence number the session will hand out — a reader comparing
+    /// two exports of one session can tell nothing was lost from the gap.
+    pub seq: u64,
+    /// The file, when one was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Runs the review pass for one sheet: quality, duplicates and outliers.
+///
+/// `async` because the pass is seconds of work on a real sheet (≈17 s at 1000
+/// icons) and a synchronous command would hold the webview's main thread for
+/// all of it. It reports no progress — the pass is one bounded operation whose
+/// stages the report itself accounts for (`renderMs`, `detectMs`, the cascade
+/// funnel) — so it is a command rather than a job; a sheet long enough to want
+/// a progress bar would want a job instead.
+#[tauri::command]
+pub async fn review_run(state: State<'_, App>, sheet_id: String) -> CmdResult<ReviewOut> {
+    let (id, bytes) = sheet_bytes(&state, &sheet_id)?;
+    let sheet = normalize(&bytes, 4096)?;
+    // The mask the overlay groups from is the mask the review measures with, and
+    // the background it detects is the colour the document is composited over:
+    // one segmentation, so the boxes in the report are the boxes on screen and
+    // the ink plane is read the way CI reads it.
+    let (mask, background) = {
+        let mut slot = session_slot(&state)?;
+        let session = slot.get_or_insert_with(|| GroupingSession::new(App::MASK_CACHE_SHEETS));
+        let seg = SegParams::default();
+        let (mask, background, _hit) = mask_cached(&bytes, 4096, &seg, session.cache_mut())?;
+        (mask, review_background(&background))
+    };
+
+    let mut guard = state.lock()?;
+    let Some(lib) = guard.as_mut() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let store = CacheStore::new(cache_dir_for(lib.path()));
+    let rows = lib.icons_for_sheet(&id)?;
+    // Documents come from the stage ⑧ payloads the vectorizer already wrote, so
+    // reviewing a traced sheet costs no extra tracing.
+    let icons = host_inputs(&rows, &store, lib)?;
+    let options = ReviewOptions {
+        background,
+        ..ReviewOptions::default()
+    };
+    let report = host_review(&sheet, &mask, &icons, &options)?;
+    let session = review_session(lib, id)?;
+    Ok(crate::review_cmds::review_out(&report, &session))
+}
+
+/// Records one triage decision, by the icon's id.
+///
+/// The icon id is the webview's handle; the sheet row it names is what the log
+/// and the export use, and the mapping is never made in the frontend.
+#[tauri::command]
+pub fn review_apply(
+    state: State<'_, App>,
+    sheet_id: String,
+    icon_id: String,
+    action: String,
+) -> CmdResult<TriageStateOut> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let icon = parse_hex16(&icon_id).ok_or_else(|| CmdError {
+        message: format!("bad icon id: {icon_id}"),
+    })?;
+    let action = TriageActionDto::parse(&action).ok_or_else(|| CmdError {
+        message: format!("unknown triage action: {action}"),
+    })?;
+    let mut guard = state.lock()?;
+    let Some(lib) = guard.as_mut() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let mut session = review_session(lib, id)?;
+    Ok(apply_decision(&mut session, lib, icon, action)?)
+}
+
+/// Takes back the most recent decision of one sheet's session.
+///
+/// `None` when there is nothing left to undo — a keystroke the workspace should
+/// not have offered, so it is reported rather than turned into an error.
+#[tauri::command]
+pub fn review_undo(state: State<'_, App>, sheet_id: String) -> CmdResult<Option<UndoDto>> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let mut guard = state.lock()?;
+    let Some(lib) = guard.as_mut() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let mut session = review_session(lib, id)?;
+    Ok(
+        undo_decision(&mut session, lib)?.map(|(triage, icon)| UndoDto {
+            triage,
+            icon: crate::review_cmds::hex32(icon),
+        }),
+    )
+}
+
+/// Renders `review.csv` (and writes it, when `outDir` is given).
+#[tauri::command]
+pub fn review_export(
+    state: State<'_, App>,
+    req: ReviewExportRequest,
+) -> CmdResult<ReviewExportDto> {
+    let id = parse_hex16(&req.sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {}", req.sheet_id),
+    })?;
+    let guard = state.lock()?;
+    let Some(lib) = guard.as_ref() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    let session = review_session(lib, id)?;
+    let out = export(&session);
+    let path = match req.out_dir.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).map_err(|e| CmdError {
+                message: format!("create {}: {e}", dir.display()),
+            })?;
+            let file = dir.join(format!("review-{}.csv", crate::review_cmds::hex32(id)));
+            std::fs::write(&file, out.csv.as_bytes()).map_err(|e| CmdError {
+                message: format!("write {}: {e}", file.display()),
+            })?;
+            Some(file.to_string_lossy().into_owned())
+        }
+    };
+    Ok(ReviewExportDto {
+        csv: out.csv,
+        decisions: out.decisions,
+        seq: out.seq,
+        path,
+    })
+}
+
+/// The triage state of one sheet: what has been decided, counting what an undo
+/// has taken back, and the size of the export it would produce.
+#[tauri::command]
+pub fn review_state(state: State<'_, App>, sheet_id: String) -> CmdResult<TriageStateOut> {
+    let id = parse_hex16(&sheet_id).ok_or_else(|| CmdError {
+        message: format!("bad sheet id: {sheet_id}"),
+    })?;
+    let guard = state.lock()?;
+    let Some(lib) = guard.as_ref() else {
+        return Err(CmdError {
+            message: "no project is open".into(),
+        });
+    };
+    Ok(review_session(lib, id)?.state())
+}
+
 /// Registers all commands on the builder.
 pub fn register(builder: Builder<tauri::Wry>) -> Builder<tauri::Wry> {
     builder.invoke_handler(tauri::generate_handler![
@@ -1810,6 +2026,11 @@ pub fn register(builder: Builder<tauri::Wry>) -> Builder<tauri::Wry> {
         sheet_plan,
         sheet_csv_preview,
         sheet_export,
+        review_run,
+        review_apply,
+        review_undo,
+        review_export,
+        review_state,
     ])
 }
 
@@ -1838,10 +2059,20 @@ mod tests {
             .collect()
     }
 
-    /// True when `pub fn name(` is directly preceded by the command attribute.
+    /// True when the named item is a `pub fn` directly preceded by the command
+    /// attribute.
+    ///
+    /// `pub async fn` counts: an asynchronous command is still a command — it
+    /// just runs off the webview's thread — and `review_run` is one, so a test
+    /// that only knew `pub fn` would call a properly attributed command
+    /// unregistered.
     fn annotated(source: &str, name: &str) -> bool {
-        let needle = format!("pub fn {name}(");
-        let Some(at) = source.find(&needle) else {
+        // The `pub` is part of the needle on purpose: it puts the start of the
+        // match at the beginning of the signature's line, so the line the
+        // attribute check looks at is the line *above* the `fn`.
+        let plain = format!("pub fn {name}(");
+        let asynchronous = format!("pub async fn {name}(");
+        let Some(at) = source.find(&asynchronous).or_else(|| source.find(&plain)) else {
             return false;
         };
         source[..at]
@@ -1859,7 +2090,7 @@ mod tests {
         let source = include_str!("commands.rs");
         let names = registered(source);
         assert!(
-            names.len() >= 17,
+            names.len() >= 25,
             "the handler list looks truncated: {names:?}"
         );
         for name in &names {
@@ -1883,7 +2114,12 @@ mod tests {
                 continue;
             };
             let next = next.trim();
-            let Some(rest) = next.strip_prefix("pub fn ") else {
+            // An asynchronous command is a `pub async fn`; both spellings are
+            // collected so the count below is the whole surface.
+            let Some(rest) = next
+                .strip_prefix("pub fn ")
+                .or_else(|| next.strip_prefix("pub async fn "))
+            else {
                 continue;
             };
             let name = rest.split('(').next().unwrap_or_default().to_string();

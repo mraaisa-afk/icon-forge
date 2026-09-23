@@ -51,6 +51,7 @@ use std::time::Instant;
 
 use isg_core::{Bbox, ForegroundMask};
 
+use crate::pipeline::background::{BackgroundKind, BackgroundModel};
 use crate::pipeline::raster::SheetRaster;
 use crate::pipeline::score::{compare_planes, score_svg, Score};
 use crate::review::dupes::{
@@ -402,6 +403,25 @@ pub fn normalized_plane(
             reason: "cell downscale failed".to_string(),
         }
     })
+}
+
+/// The background a review composites against, from the sheet's segmentation.
+///
+/// Otsu and alpha backgrounds are *decisions* rather than colour samples (the
+/// Otsu model's `rgba` is `[0; 4]` by construction, and transparency is not a
+/// colour at all), so those composite against white — which is also what the
+/// sheet exporter writes. Every other detector measured a colour, and that
+/// colour is what the ink plane has to be read against.
+///
+/// This is the one definition of that choice: the Phase-6 gate measures with it
+/// and the host commands build their [`ReviewOptions`] with it, so the review in
+/// the app cannot be reading a different background than the review in CI.
+#[must_use]
+pub fn review_background(model: &BackgroundModel) -> [u8; 4] {
+    match model.kind {
+        BackgroundKind::Otsu | BackgroundKind::Alpha => [255, 255, 255, 255],
+        _ => model.rgba,
+    }
 }
 
 /// blake3 of a normalised plane — the cascade's confirm-by-identity stage.

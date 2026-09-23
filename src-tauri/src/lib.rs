@@ -8,6 +8,7 @@
 
 pub mod commands;
 pub mod jobs;
+pub mod review_cmds;
 pub mod state;
 
 use tauri::Manager;

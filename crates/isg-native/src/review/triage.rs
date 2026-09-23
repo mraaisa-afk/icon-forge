@@ -187,6 +187,26 @@ impl TriageLog {
         Some((id, previous))
     }
 
+    /// The next sequence number this log will hand out.
+    ///
+    /// Exposed because the number is part of the export's contract: a reader
+    /// comparing two `review.csv`s of one session can tell that nothing was lost
+    /// from the gap between the highest `seq` and this.
+    #[must_use]
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// True when there is a decision left to undo.
+    ///
+    /// The workspace binds `Ctrl+Z` to [`TriageLog::undo`], and an undo that
+    /// returns `None` on an empty history is a keystroke the user should never
+    /// have been invited to make — so it asks first.
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        !self.history.is_empty()
+    }
+
     /// The current decision for an icon, if any.
     #[must_use]
     pub fn decision(&self, id: u32) -> Option<TriageDecision> {
@@ -353,6 +373,11 @@ mod tests {
         assert_eq!(decision.at_ms, 1_700_000_000_000);
         assert_eq!(log.len(), 2);
         assert!(!log.is_empty());
+        // Two decisions were taken, so both can be undone and then nothing can.
+        assert!(log.can_undo());
+        log.undo();
+        log.undo();
+        assert!(!log.can_undo(), "an empty history has nothing to undo");
     }
 
     #[test]
