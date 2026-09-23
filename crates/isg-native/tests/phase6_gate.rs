@@ -648,7 +648,7 @@ fn g1_duplicates_are_found_and_not_invented() {
 
 #[test]
 fn g1b_the_cascade_holds_at_a_thousand_icons() {
-    // Sixty-three copies of the sixteen traced documents: 1008 icons of real
+    // Sixty-three copies of each of sheet 15's sixteen icons: 1008 icons of real
     // geometry, which is the shape of the job the LSH exists for.
     let (sheet, _mask, groups, inputs, truth) = traced("15_c9_duplicates", TracePreset::Balanced);
     let seg = SegParams::default();
@@ -659,7 +659,9 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
     let started = Instant::now();
     let mut hash_items = Vec::with_capacity(n as usize);
     let mut planes = Vec::with_capacity(n as usize);
-    let mut group_of = BTreeMap::new();
+    let mut document_of: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut copies_of: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut key_of: BTreeMap<&str, u32> = BTreeMap::new();
     for copy in 0..copies {
         for input in &inputs {
             let id = copy * inputs.len() as u32 + input.id;
@@ -671,7 +673,10 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
                 a: isg_native::review::a_hash(&plane, CELL, CELL).unwrap_or(0),
                 digest: plane_digest(&plane),
             });
-            group_of.insert(id, input.id);
+            let next = key_of.len() as u32 + 1;
+            let document = *key_of.entry(input.document.as_str()).or_insert(next);
+            document_of.insert(id, document);
+            *copies_of.entry(document).or_default() += 1;
             planes.push(plane);
         }
     }
@@ -688,35 +693,19 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
 
     // Ground truth: two icons are copies exactly when the same tracing produced
     // them — the definition G1 uses, so the two tests cannot disagree about what
-    // a duplicate is. Sheet 15 ships the sixteen documents, one icon each, and
-    // the loop above replicated each of them 63 times, so the truth is
-    // 16 × C(63, 2) pairs. A pair of *different* documents is classified by the
+    // a duplicate is. The document is its bytes, which matters here for a reason
+    // the ids hide: sheet 15 draws sixteen icons but holds only twelve distinct
+    // tracings (G1 measures four byte-identical pairs among them — 1 and 14 are
+    // one), so four of these classes have 63 × 2 copies and eight have 63. The
+    // classes were built by the loop above and their sizes are printed below
+    // instead of assumed. A pair of *different* documents is classified by the
     // artwork the corpus labels: the same shape means the four differently-sized
     // circles are variants of one shape — the class (C) reports and does not
     // judge — while two different shapes are different artwork, the only thing a
     // precision bar may count against the cascade here.
-    let mut document_of: BTreeMap<u32, u32> = BTreeMap::new();
-    for item in &hash_items {
-        document_of.insert(item.id, group_of[&item.id]);
-    }
-    // `document_of` groups by the sheet icon a copy was traced from; the check
-    // below is what makes that a statement about the *document* rather than about
-    // the loop counter — if two of the sixteen ever stopped differing in bytes,
-    // or one of them stopped being one drawing, this stops agreeing.
-    for a in &inputs {
-        for b in &inputs {
-            assert_eq!(
-                a.document == b.document,
-                a.id == b.id,
-                "sheet 15's documents must be byte-distinct: {} vs {}",
-                a.id,
-                b.id
-            );
-        }
-    }
     let mut shape_of: BTreeMap<u32, String> = BTreeMap::new();
     for (group, input) in groups.iter().zip(&inputs) {
-        shape_of.insert(input.id, truth_for(group, &truth).1);
+        shape_of.insert(document_of[&input.id], truth_for(group, &truth).1);
     }
 
     let ids: Vec<u32> = hash_items.iter().map(|h| h.id).collect();
@@ -743,7 +732,7 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
     let judged: BTreeSet<(u32, u32)> = predicted.difference(&variant_pairs).copied().collect();
     let judged_hits = judged.intersection(&truth_pairs).count();
     let all_pairs = u64::from(n) * u64::from(n - 1) / 2;
-    let copies_per_document = copies as usize;
+    let document_sizes: Vec<usize> = copies_of.values().copied().collect();
     let cluster_sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
     // A cluster that holds a document must hold *all* of it. Recall above 0.95
     // would still allow a document split between two clusters — 60 copies in one
@@ -756,7 +745,7 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
             *per_document.entry(document_of[id]).or_default() += 1;
         }
         for (document, count) in per_document {
-            if count != copies_per_document {
+            if count != copies_of[&document] {
                 partial.push((document, count));
             }
         }
@@ -775,13 +764,15 @@ fn g1b_the_cascade_holds_at_a_thousand_icons() {
 
     // --- evidence before the assertions (see G1) -----------------------------
     eprintln!(
-        "evidence: phase6 G1b icons={n} documents={} copies_each={copies_per_document} \
+        "evidence: phase6 G1b icons={n} icons_on_the_sheet={} documents={} \
+         copies_per_document={document_sizes:?} \
          clusters={} cluster_sizes={cluster_sizes:?} cluster_shapes={cluster_shapes:?} \
          candidates={} (all-pairs {all_pairs}, {:.2}% proposed) verify={} confirm={} \
          identical_pairs={} variant_pairs={} artwork_pairs={} recall={recall:.4} \
          precision={precision:.4} raw={raw_precision:.4} cross_shape={} judged={judged_hits}/{} \
          render={render_ms:.0} ms cascade={cascade_ms:.0} ms (per icon {:.3} ms)",
         inputs.len(),
+        copies_of.len(),
         clusters.len(),
         counts.candidates,
         100.0 * counts.candidates as f64 / all_pairs as f64,

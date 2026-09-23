@@ -301,8 +301,12 @@ bar separates them; the Hausdorff does separate them (3.31 % vs 8.92 %), but onl
 above the 2 % bar; the SSIM only above 0.59, which is not a meaningful SSIM. The
 gate's truth is what the design can promise — **the same tracing**, byte for
 byte, derived from the documents the shipping path produced rather than from the
-cascade's own plane digests — and the 10 variant pairs are reported with their
-metrics instead of being asserted either way. Precision is measured where the
+cascade's own plane digests. That class is smaller than the sheet looks: its
+sixteen icons are not sixteen tracings (G1 measures four byte-identical pairs
+among them — icons 1 and 14 are one drawing), so the 1000-icon test builds its
+document classes from the bytes and prints their sizes instead of assuming one
+document per icon. The 10 variant pairs are reported with their metrics instead
+of being asserted either way. Precision is measured where the
 labels name different artwork: on `15_c9_duplicates`, a merge that crosses a
 shape is what costs it and the same-shape variant merges are printed rather than
 scored, and on `12_c2_latency_grid`'s 100 icons of ten shapes at similar sizes,
