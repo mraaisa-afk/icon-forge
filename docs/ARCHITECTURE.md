@@ -288,6 +288,31 @@ Plus keyboard triage: `A`pprove / `R`eject / `F`lag / `D`uplicate / `Space` over
 
 **The cascade may only narrow.** dHash (9 × 8 gradient) and aHash (8 × 8 mean) over the cell, banded into four 16-bit LSH keys each, propose candidate pairs in `O(n)` instead of `O(n²)`; ink IoU ≥ 0.92 **or** normalised Hausdorff ≤ 0.02 (a two-pass chamfer over the cell, symmetric and divided by the cell diagonal) verifies a candidate; and only an identical blake3 digest of the cell or SSIM ≥ 0.97 confirms it. Nothing is reported as a duplicate on a hash match alone — that is where precision comes from — and the SSIM is `pipeline::score::compare_planes`, the *same* metric stage ⑧ scores with, made public for the purpose: two implementations that could round differently would make an icon "a duplicate" in the review and "not a duplicate" in its own quality score.
 
+**What the duplicate criterion is measured against, and what it is not.** §3.6's
+cascade is a *near-identity* detector: the confirm stage asks for an SSIM of 0.97
+on the 64-cell, which is sub-pixel agreement. The C9 corpus sheet is a shape set
+with ±2 px size jitter and a stroke drawn from a range per shape, so its four
+copies of a shape are four *drawings*: all four circles sit in the same 47 px box
+yet their traced cells hold 2968 and 3133 ink pixels — two tracings 2.7 % apart
+in radius — and the four rings' cells hold 1285 to 1490. The two classes
+therefore overlap on this sheet: the worst same-shape pair scores IoU 0.686,
+which is *less* similar than the best different-shape pair at 0.765, so no IoU
+bar separates them; the Hausdorff does separate them (3.31 % vs 8.92 %), but only
+above the 2 % bar; the SSIM only above 0.59, which is not a meaningful SSIM. The
+gate's truth is what the design can promise — **the same tracing**, byte for
+byte, derived from the documents the shipping path produced rather than from the
+cascade's own plane digests — and the 10 variant pairs are reported with their
+metrics instead of being asserted either way. Precision is measured twice: on
+`15_c9_duplicates`, where any merge outside the identical pairs costs it
+directly, and on `12_c2_latency_grid`'s 100 icons of ten shapes at similar sizes,
+where the cascade must produce no cluster that mixes two shapes and no
+cross-shape pair may pass both stages inside §3.6's bars — the closest
+cross-shape pair's three metrics are printed so the margin is visible.
+(The chamfer transform behind the Hausdorff figure was found broken by this work
+and fixed in Phase 6: its backward sweep was guarded so it never relaxed a pixel
+the forward sweep had reached, which made a 1.33 px wall difference read as
+17 px — see the `hausdorff_sees_a_thin_wall_as_thin` unit test.)
+
 **Outliers use MAD, with the fallback that matters.** Modified z-scores `0.6745·(x − median)/MAD` above 3.5 over ink size, stroke, node count, colours and solidity, plus modal style/palette mismatch when one class covers at least half the sheet. The fallback is the point: the MAD is **zero** exactly when more than half the sheet is identical — the roadmap's own *"99 icons are 2 px outline, one is a filled blob"* — so a zero MAD falls back to the mean absolute deviation (Iglewicz & Hoaglin), and a sheet where every value is equal reports no outliers instead of dividing by zero.
 
 **The triage log is state, not a list.** At most one decision per icon, each timestamped and sequence-numbered; `undo` restores *the decision it replaced* (a flag that was then rejected goes back to flagged, not to undecided); sequence numbers never go backwards, so `review.csv` is stable and its rows are chronological regardless of the ids. The export round-trips through the sheet module's own `parse_csv`. An imported log deliberately has no undo history: the keystrokes that produced the file are not in it.
