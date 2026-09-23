@@ -840,6 +840,7 @@ fn g1c_the_cascade_never_merges_different_artwork() {
         closest.0,
         closest.1,
         closest.2,
+        closest_haus,
         closest.3,
         options.dupes.iou_min,
         options.dupes.hausdorff_max,
