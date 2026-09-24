@@ -123,6 +123,37 @@ jobs:
               | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
           )"
 
+      # The size check above is an inference: a large installer *should* contain
+      # the WebView2 payload. This one looks inside it. 7-Zip reads the NSIS
+      # archive, so the payload's own files are listed by name — direct evidence
+      # rather than a number that has to be reasoned about. It reports rather than
+      # gates: a runner without 7-Zip should not block a release, and the size
+      # check is what catches the silent fallback to `downloadBootstrapper`.
+      - name: Inspect the installer contents for the WebView2 payload
+        shell: bash
+        run: |
+          set -o pipefail
+          installer=$(ls target/release/bundle/nsis/*-setup.exe \
+                       src-tauri/target/release/bundle/nsis/*-setup.exe 2>/dev/null | head -1 || true)
+          seven=$(command -v 7z || command -v 7za || ls "/c/Program Files/7-Zip/7z.exe" 2>/dev/null || true)
+          if [ -z "$seven" ] || [ -z "$installer" ]; then
+            echo "evidence: phase7 P3 inspection=unavailable (7z=$seven installer=${installer:-none})" \
+              | tee -a target/release-evidence.txt
+            exit 0
+          fi
+          list=$("$seven" l "$installer" 2>/dev/null || true)
+          entries=$(printf '%s' "$list" | grep -cE '^\([0-9]|^ *[0-9]+ +[0-9]' || true)
+          payload=$(printf '%s' "$list" | grep -iE 'webview2|edgewebview' | head -5 || true)
+          if [ -z "$payload" ]; then
+            echo "evidence: phase7 P3 inspection=no-webview2-entry entries=$entries" \
+              | tee -a target/release-evidence.txt
+            exit 0
+          fi
+          {
+            echo "evidence: phase7 P3 webview2_payload_files=$(printf '%s' "$payload" | wc -l) entries=$entries"
+            printf '%s\n' "$payload" | sed 's/^/  /'
+          } | tee -a target/release-evidence.txt
+
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:

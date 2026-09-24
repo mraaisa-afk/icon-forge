@@ -15,13 +15,16 @@ name: CI
 on:
   push:
     branches: [main, "arena/**"]
-    # Verification builds. A workflow that exists only on an unmerged branch
-    # cannot be dispatched *or* tag-triggered: GitHub registers workflows from
-    # the default branch, so `release.yml` is invisible until it lands on `main`
-    # (`gh workflow run release.yml` 404s, and pushing a tag that its `push: tags`
-    # filter matches starts nothing). This file *is* registered, so a tag matching
-    # this pattern runs the gates above plus the installer job below — which calls
-    # `release.yml`, so the artifact is built by exactly the definition a release
+    # Verification builds. Even though `release.yml` now triggers on a tag push by
+    # itself, that route is not one to depend on: `gh workflow run release.yml`
+    # returns 404 (it is not among the registered workflows — GitHub lists only
+    # workflows that exist on the default branch), the default branch's `ci.yml`
+    # has no `workflow_dispatch`, so the Actions UI offers no button, and the
+    # first attempt at a tag push produced no run at all (measured; the same tag
+    # pushed later did trigger it, and no rule that explains both was established).
+    # This file *is* registered, so the tag below is the trigger that worked
+    # deterministically in both attempts, and its `installer` job calls
+    # `release.yml` — the artifact is built by exactly the definition a release
     # will use:
     #
     #     git tag -a v0.0.0-verify-installer -m "…" && git push origin v0.0.0-verify-installer
