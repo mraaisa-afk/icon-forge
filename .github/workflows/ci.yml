@@ -74,6 +74,16 @@ jobs:
       - name: Check (release, workspace)
         run: cargo check --workspace --release
 
+      # Phase 7: the code's half of "USB install with networking disabled".
+      # Runs after the check above, so Cargo.lock exists and the transitive half
+      # of the dependency check is live rather than reported absent.
+      - name: Offline verification — the app holds no network capability
+        shell: bash
+        run: |
+          set -o pipefail
+          PY=$(command -v python3 || command -v python)
+          "$PY" tools/offline_check.py 2>&1 | tee target/offline-evidence.txt
+
       # Phase 4 adds the editor: the same keystone now covers the crate that
       # actually ships as WebAssembly.
       - name: "Keystone: isg-core + isg-wasm compile for wasm32-unknown-unknown"
@@ -174,6 +184,12 @@ jobs:
           # store and its browser fallback are what no Rust gate can see.
           REVIEWUI=$(grep -hE 'evidence: review' \
             target/ui-evidence.txt 2>/dev/null | head -20 || true)
+          # Phase 7's offline verification prints its own lines, from two files:
+          # the gate's verdicts (present on both legs) and the negative controls
+          # (Ubuntu leg, where the self-test runs).
+          PHASE7=$(grep -hE 'evidence: phase7' \
+            target/offline-evidence.txt target/offline-selftest-evidence.txt \
+            2>/dev/null | head -20 || true)
           {
             echo "## Evidence (run-produced)"
             echo '```text'
@@ -184,6 +200,7 @@ jobs:
             printf '%s\n' "$PHASE6"
             printf '%s\n' "$PHASE6CRIT"
             printf '%s\n' "$REVIEWUI"
+            printf '%s\n' "$PHASE7"
             echo '```'
             echo '```json'
             tail -c 3000 target/spike-evidence.json 2>/dev/null || true
@@ -216,6 +233,7 @@ jobs:
           announce "Icon Forge phase 6 evidence" "$PHASE6"
           announce "Icon Forge phase 6 criteria" "$PHASE6CRIT"
           announce "Icon Forge phase 6 review workspace" "$REVIEWUI"
+          announce "Icon Forge phase 7 offline verification" "$PHASE7"
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
       # has no rustfmt, so formatting is verified here and fixed from the
@@ -262,6 +280,20 @@ jobs:
       # platform is Windows. Every other workspace crate must be clean.
       - name: Check all non-Tauri crates
         run: cargo check -p isg-core -p isg-wasm -p isg-native -p isg-spike-groupall -p isg-gen-corpus
+
+      # Phase 7, both halves: the gate itself, then the proof that the gate can
+      # fail. `offline_check_selftest.py` copies the tree, re-introduces each
+      # network capability the gate claims to catch and requires a rejection for
+      # the stated reason — a check that has never rejected anything is not
+      # evidence. Lives on this leg because it is pure Python and needs no
+      # Windows toolchain.
+      - name: "Offline verification + negative controls"
+        shell: bash
+        run: |
+          set -o pipefail
+          PY=$(command -v python3 || command -v python)
+          "$PY" tools/offline_check.py 2>&1 | tee target/offline-evidence.txt
+          "$PY" tools/offline_check_selftest.py 2>&1 | tee target/offline-selftest-evidence.txt
 
       # Lives on this leg because cargo-deny-action is a container action
       # (Linux-only on GitHub runners). Policy identical on every platform:

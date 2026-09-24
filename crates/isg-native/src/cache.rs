@@ -76,9 +76,12 @@ impl CacheStore {
         Ok(path)
     }
 
-    /// Looks a payload up; `Ok(None)` on a cache miss (also when the row
-    /// exists but its file vanished — the row is reported missing either
-    /// way; the caller re-computes).
+    /// Looks a payload up; `Ok(None)` on a cache miss.
+    ///
+    /// Three things count as a miss, because all three are recoverable by
+    /// recomputing: no row, a row whose file vanished, and a file that will not
+    /// decompress. Only the *store* failing (an I/O error on the way in, a
+    /// compression failure on the way out) is an error.
     pub fn get(&self, lib: &Library, key: &str) -> crate::Result<Option<Vec<u8>>> {
         let Some(path_str) = lib.cache_get(key) else {
             return Ok(None);
@@ -87,7 +90,15 @@ impl CacheStore {
         let Ok(compressed) = fs::read(&path) else {
             return Ok(None);
         };
-        let payload = zstd::stream::decode_all(&compressed[..]).map_err(IsgError::Zstd)?;
+        // A payload that will not decompress is a *miss*, not a failure. The
+        // cache holds derived data — the sheet is the source of truth and every
+        // payload in here can be recomputed — so a scratched sector or a
+        // half-written file must cost one re-trace, not an entire vectorize job
+        // that cannot run. The caller recomputes, and its `put` writes over the
+        // bad bytes; that is what makes the cache self-healing.
+        let Ok(payload) = zstd::stream::decode_all(&compressed[..]) else {
+            return Ok(None);
+        };
         Ok(Some(payload))
     }
 }

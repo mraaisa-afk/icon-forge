@@ -25,3 +25,7 @@ dist/
 # copied into public/ for the dev server and for the app bundle)
 public/isg_wasm.wasm
 crates/isg-wasm/pkg/
+
+# Python bytecode from the tools/ scripts (offline verification, fmtcheck).
+__pycache__/
+*.pyc
