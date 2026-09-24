@@ -144,7 +144,13 @@ export function ReviewWorkspace() {
   };
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-forge-bg" data-testid="review-workspace">
+    <section
+      // A named <section> is a landmark, so the workspace is reachable by
+      // region navigation instead of by tabbing through the whole app.
+      aria-label="Review workspace"
+      className="flex min-h-0 flex-1 flex-col bg-forge-bg"
+      data-testid="review-workspace"
+    >
       <header className="shrink-0 border-b border-forge-edge px-3 py-2">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
@@ -194,7 +200,7 @@ export function ReviewWorkspace() {
           </div>
         </div>
 
-        <div className="mt-2 flex flex-wrap items-center gap-1">
+        <div className="mt-2 flex flex-wrap items-center gap-1" role="group" aria-label="Review filters">
           {REVIEW_FILTERS.map((tab: ReviewFilter) => (
             <button
               key={tab}
@@ -242,7 +248,11 @@ export function ReviewWorkspace() {
               Nothing on this tab — {review.icons.length} icons in the pass.
             </div>
           ) : (
-            <div style={{ height: listWindow.totalHeight, position: "relative" }}>
+            <div
+              role="list"
+              aria-label={`icons under review, ${rows.length} on this tab`}
+              style={{ height: listWindow.totalHeight, position: "relative" }}
+            >
               <div style={{ transform: `translateY(${listWindow.offsetY}px)` }}>
                 {slice.map((icon) => (
                   <ReviewRow
@@ -261,7 +271,15 @@ export function ReviewWorkspace() {
 
         <aside className="w-80 shrink-0 overflow-y-auto border-l border-forge-edge p-3 text-[10px]">
           <div className="text-forge-text">Triage</div>
-          <div className="mt-1 text-forge-dim" data-testid="review-progress">
+          {/* The triage loop is keyboard-driven and its only feedback is this
+              line, so it is a live region: a screen-reader user hears the count
+              change as they decide, the same way a sighted user sees it. */}
+          <div
+            className="mt-1 text-forge-dim"
+            data-testid="review-progress"
+            role="status"
+            aria-live="polite"
+          >
             {progressLine(review.triage, review.icons.length)}
           </div>
           <div className="mt-1 text-forge-dim" data-testid="review-pace">

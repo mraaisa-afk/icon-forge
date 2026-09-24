@@ -53,6 +53,13 @@ export function ReviewRow({
     <div
       data-testid="review-row"
       data-state={icon.state}
+      // The row is a click target and a keyboard cursor, so it needs to be
+      // something a screen reader can describe and a reviewer can hear: which
+      // icon, what state it is in, and whether the cursor is on it.
+      role="listitem"
+      aria-label={`icon ${icon.index}, ${icon.state}, ${shortHash(icon.id, 4)}${
+        selected ? ", selected" : ""
+      }`}
       onClick={onSelect}
       className={
         "flex cursor-default items-center gap-3 border-b border-forge-edge/60 px-3 py-2 " +
@@ -107,6 +114,11 @@ export function ReviewRow({
           type="button"
           data-testid="review-overlay"
           title="Sheet crop overlay (Space)"
+          // The glyph is the only label this button has on screen.
+          aria-label={`sheet crop overlay for icon ${icon.index}`}
+          // Space is the overlay key but not a decision, so it is not in
+          // TRIAGE_KEYS; the other four shortcuts are read from the table.
+          aria-keyshortcuts="Space"
           onClick={(e) => {
             e.stopPropagation();
             onOverlay();
@@ -121,6 +133,11 @@ export function ReviewRow({
             type="button"
             data-testid={`review-decide-${decision.action}`}
             title={`${decision.action} (${TRIAGE_KEYS[decision.action]})`}
+            // "A" is not a name: the button is the action for *this* icon, and
+            // the shortcut is announced rather than left in a tooltip.
+            aria-label={`${decision.action} icon ${icon.index}`}
+            aria-keyshortcuts={TRIAGE_KEYS[decision.action]}
+            aria-pressed={icon.state === decision.action}
             onClick={(e) => {
               e.stopPropagation();
               onDecide(decision.action);
