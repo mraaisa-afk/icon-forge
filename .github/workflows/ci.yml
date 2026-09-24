@@ -184,12 +184,14 @@ jobs:
           # store and its browser fallback are what no Rust gate can see.
           REVIEWUI=$(grep -hE 'evidence: review' \
             target/ui-evidence.txt 2>/dev/null | head -20 || true)
-          # Phase 7's offline verification prints its own lines, from two files:
-          # the gate's verdicts (present on both legs) and the negative controls
-          # (Ubuntu leg, where the self-test runs).
+          # Phase 7 prints its own lines, from three files: the gate's verdicts
+          # and its negative controls (offline-*), and the hardening suites'
+          # measurements (test-evidence) — the latter would otherwise fall past
+          # the ~4 KiB cut of the combined notice, which is exactly why each
+          # phase has its own.
           PHASE7=$(grep -hE 'evidence: phase7' \
             target/offline-evidence.txt target/offline-selftest-evidence.txt \
-            2>/dev/null | head -20 || true)
+            target/test-evidence.txt 2>/dev/null | head -20 || true)
           {
             echo "## Evidence (run-produced)"
             echo '```text'
