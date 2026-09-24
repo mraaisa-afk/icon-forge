@@ -13,6 +13,12 @@
 # not.name: Release
 
 on:
+  # `workflow_dispatch` cannot be dispatched directly while this file exists only
+  # on an unmerged branch: GitHub resolves dispatchable workflows from the
+  # default branch. `workflow_call` lets `ci.yml` (which is on the default
+  # branch) invoke it on demand, which is how the installer is built and checked
+  # before the release path itself has landed.
+  workflow_call:
   workflow_dispatch:
     inputs:
       ref:
