@@ -15,11 +15,25 @@ name: CI
 on:
   push:
     branches: [main, "arena/**"]
+    # Verification builds. A workflow that exists only on an unmerged branch
+    # cannot be dispatched *or* tag-triggered: GitHub registers workflows from
+    # the default branch, so `release.yml` is invisible until it lands on `main`
+    # (`gh workflow run release.yml` 404s, and pushing a tag that its `push: tags`
+    # filter matches starts nothing). This file *is* registered, so a tag matching
+    # this pattern runs the gates above plus the installer job below — which calls
+    # `release.yml`, so the artifact is built by exactly the definition a release
+    # will use:
+    #
+    #     git tag -a v0.0.0-verify-installer -m "…" && git push origin v0.0.0-verify-installer
+    #
+    # The pattern is deliberately impossible to mistake for a release version.
+    tags: ["v0.0.0-verify*"]
   pull_request:
   # On-demand: the same gates, plus the Windows installer. The installer lives in
-  # `release.yml` (tagged releases and this button share one definition); it is
-  # called rather than duplicated, so the artifact that ships is the artifact
-  # this workflow builds.
+  # `release.yml` (tagged releases and this trigger share one definition); it is
+  # called rather than duplicated, so the artifact this builds is the artifact a
+  # release will ship. Needs `actions: write`, which some sandbox tokens lack —
+  # the tag above is the path that always works.
   workflow_dispatch:
 
 env:
@@ -30,8 +44,10 @@ jobs:
   # bootstrapper (~127 MB) and runs a release build of the shell, which is not a
   # cost to pay on every push.
   installer:
-    name: "Installer (on demand): NSIS with embedded WebView2"
-    if: github.event_name == 'workflow_dispatch'
+    name: "Installer: NSIS with embedded WebView2"
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v0.0.0-verify')
     uses: ./.github/workflows/release.yml
 
   windows-primary:
