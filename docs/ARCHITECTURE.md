@@ -306,7 +306,15 @@ sixteen icons are not sixteen tracings (G1 measures four byte-identical pairs
 among them — icons 1 and 14 are one drawing), so the 1000-icon test builds its
 document classes from the bytes and prints their sizes instead of assuming one
 document per icon. The 10 variant pairs are reported with their metrics instead
-of being asserted either way. Precision is measured where the
+of being asserted either way, and the cell is fitted to the icon's **ink box** —
+longest side scaled to fill it, centred — so *size* is not what separates two
+copies of one shape either: G1's three squares, in boxes of 46, 48 and 50 px,
+print one hash pair and 4096 of 4096 cell pixels of ink, because each of them is
+its own ink box and each therefore fills the cell. Two drawings of one shape at
+different sizes are likewise one class the cascade *reports* and the gate does
+not judge. (Found the direct way: R3's first surface fixture used a 56 px and a
+32 px rectangle as if they were two different documents, and all four icons came
+back as one cluster; the fixture now uses two different drawings.) Precision is measured where the
 labels name different artwork: on `15_c9_duplicates`, a merge that crosses a
 shape is what costs it and the same-shape variant merges are printed rather than
 scored, and on `12_c2_latency_grid`'s 100 icons of ten shapes at similar sizes,

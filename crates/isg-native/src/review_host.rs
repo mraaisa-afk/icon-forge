@@ -385,6 +385,12 @@ mod tests {
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">"##,
         r##"<rect x="16" y="16" width="32" height="32" fill="#000000"/></svg>"##
     );
+    /// A plus whose ink box is the same 56 × 56 square [`RECT`]'s is, so the two
+    /// fill the review's cell as *different* artwork.
+    const PLUS: &str = concat!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">"##,
+        r##"<path d="M28 4 H36 V28 H60 V36 H36 V60 H28 V36 H4 V28 H28 Z" fill="#000000"/></svg>"##
+    );
 
     /// A white sheet with the mask set inside each given box.
     fn sheet_and_mask(side: u32, ink: &[Bbox]) -> (SheetRaster, ForegroundMask) {
@@ -428,14 +434,18 @@ mod tests {
 
     #[test]
     fn a_duplicate_cluster_comes_back_in_library_ids() {
-        // Two icons with one document between them, plus two different ones.
+        // Two pairs, each pair one document used twice, and the two documents
+        // *different* artwork. Two sizes of one shape would not do: the review
+        // fits its cell to the icon's ink box, so a 56 px square and a 32 px
+        // square are one duplicate class by design and both pairs would merge
+        // (which is how the first version of this fixture failed).
         let boxes = [boxed(0, 0), boxed(32, 0), boxed(0, 32), boxed(32, 32)];
         let (sheet, mask) = sheet_and_mask(64, &boxes);
         let icons = vec![
             icon(1, (0, 0), Some(RECT)),
             icon(2, (32, 0), Some(RECT)),
-            icon(3, (0, 32), Some(SMALLER)),
-            icon(4, (32, 32), Some(SMALLER)),
+            icon(3, (0, 32), Some(PLUS)),
+            icon(4, (32, 32), Some(PLUS)),
         ];
         let review = host_review(&sheet, &mask, &icons, &options()).expect("a pass");
         assert_eq!(review.skipped, Vec::new());

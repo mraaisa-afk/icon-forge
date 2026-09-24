@@ -413,8 +413,14 @@ fn the_measured_crop_is_the_box_on_the_sheet() {
             mask.set(x, y, true);
         }
     }
-    let document = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\">\
-                    <rect width=\"16\" height=\"16\" fill=\"#000000\"/></svg>";
+    // A traced document is the engine's own dialect — `<path>` data, never a
+    // `<rect>`: the review counts the segments the engine's parser produced, and
+    // a `<rect>` produces none. Four lines back to the start is the traced
+    // square; `Z` closes it without adding a fifth segment.
+    let document = concat!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">"##,
+        r##"<path d="M0,0L4,0L4,4L0,4L0,0Z" fill="#000000"/></svg>"##
+    );
     let icons = vec![HostIcon {
         id: icon(1),
         bbox: (0, 0, 16, 16),
@@ -436,8 +442,10 @@ fn the_measured_crop_is_the_box_on_the_sheet() {
         review.digest != [0u8; 32],
         "the cell was hashed, not left at zero"
     );
-    assert!(
-        review.node_count >= 4,
-        "a rectangle traces to at least four points"
+    assert_eq!(
+        review.node_count, 4,
+        "the traced square is four lines — `Z` closes, it does not add a segment"
     );
+    assert!(review.closed, "the document's `Z` closed the outline");
+    assert_eq!(review.colours, 1, "one fill in the document");
 }
