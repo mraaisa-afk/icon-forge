@@ -281,6 +281,10 @@ def check_source() -> list[str]:
     scanned = 0
     for path in source_files():
         rel = path.relative_to(REPO)
+        # Always the POSIX form: `str(Path)` uses backslashes on Windows, and a
+        # key that changes with the host is a key that silently misses (this was
+        # a real Windows-only false positive in the first CI run).
+        rel_posix = rel.as_posix()
         if rel in SOURCE_EXEMPT:
             continue
         # Tests may build a socket to prove a refusal; shipped code may not.
@@ -300,20 +304,33 @@ def check_source() -> list[str]:
                         continue
                     if is_test:
                         continue
-                    problems.append(f"{rel}:{lineno} holds a remote URL: {url[:80]}")
+                    problems.append(f"{rel_posix}:{lineno} holds a remote URL: {url[:80]}")
                 if not is_test:
                     for call in TS_FETCH.finditer(line):
                         raw = call.group(1).strip()
                         target, reason = resolve_fetch_target(raw, consts)
                         if reason and re.fullmatch(r"[A-Za-z_$][\w$]*", raw):
-                            allowed = FETCH_ALLOW.get((str(rel), raw))
+                            allowed = FETCH_ALLOW.get((rel_posix, raw))
                             if allowed:
-                                allowed_hits.add((str(rel), raw))
+                                allowed_hits.add((rel_posix, raw))
                                 proven, why = allowed_target(*allowed)
                                 target, reason = proven, why
-                        fetch_sites.append((str(rel), lineno, target))
+                        fetch_sites.append((rel_posix, lineno, target))
                         if reason:
-                            problems.append(f"{rel}:{lineno} fetch({raw[:60]}) {reason}")
+                            problems.append(f"{rel_posix}:{lineno} fetch({raw[:60]}) {reason}")
+    # Structural guard: an allow-list key is a path, so it must be written and
+    # resolved portably. A Windows-style key would silently miss on Linux (and
+    # vice versa), which is exactly the false positive this check paid for once.
+    for (entry_path, param), (holder, const) in FETCH_ALLOW.items():
+        if "\\" in entry_path or "\\" in holder:
+            problems.append(
+                f"the fetch allow-list entry {entry_path!r}:{param} uses OS-specific separators"
+            )
+        elif not (REPO / entry_path).exists():
+            problems.append(f"the fetch allow-list entry {entry_path!r} names a file that is absent")
+        elif not (REPO / holder).exists():
+            problems.append(f"the fetch allow-list reads {holder!r}, which is absent")
+
     stale = sorted(set(FETCH_ALLOW) - allowed_hits)
     problems.extend(
         f"the fetch allow-list lists {path}:{param}, which no longer fetches anything"
