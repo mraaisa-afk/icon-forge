@@ -44,7 +44,13 @@ jobs:
           # frontend's numbers with it, and the review workspace's evidence is
           # the only record of the phase-6 UI half.
           mkdir -p target
-          npm run test 2>&1 | tee target/ui-evidence.txt
+          # Colour is stripped before anything is recorded: vitest emits ANSI
+          # escapes on the runner, and an evidence line that arrives as
+          # `\u001b[22m\u001b[39mevidence: …` is one a reviewer has to clean by
+          # hand before quoting it.
+          npm run test 2>&1 \
+            | sed -e 's/\x1b\[[0-9;]*m//g' \
+            | tee target/ui-evidence.txt
           npm run build
 
       - name: Rust toolchain
@@ -194,8 +200,12 @@ jobs:
           # them.
           announce() {
             local body
+            # The ANSI strip is belt-and-braces: the frontend step already
+            # cleans its own file, but cargo colours its output too, and the
+            # notices are read through the API by a reviewer who should not
+            # have to strip escapes to quote a number.
             body=$(printf '%s' "$2" | head -c 3600 \
-              | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
+              | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/%/%25/g' -e 's/\r/%0D/g' \
               | awk '{printf "%s%%0A", $0}')
             echo "::notice title=$1::${body}"
           }

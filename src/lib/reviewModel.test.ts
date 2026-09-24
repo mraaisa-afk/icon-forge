@@ -35,6 +35,18 @@ import {
   progressLine,
   REVIEW_FILTERS,
   shortHash,
+  type ReviewCascadeDto,
+  type ReviewClusterDto,
+  type ReviewDecisionDto,
+  type ReviewExportDto,
+  type ReviewExportRequestDto,
+  type ReviewOutlierDto,
+  type ReviewScoreDto,
+  type ReviewSheetOutlierDto,
+  type ReviewSkippedDto,
+  type ReviewStatDto,
+  type ReviewTriageDto,
+  type ReviewUndoDto,
   stateAfter,
   TRIAGE_ACTIONS,
   TRIAGE_BUDGET_MS,
@@ -371,5 +383,172 @@ describe("the workspace's lines", () => {
     expect(a.dHash === b.dHash).toBe(true);
     expect(a.aHash === b.aHash).toBe(true);
     expect(icon(3, { dHash: "ffffffffffffffff" }).dHash).not.toBe(a.dHash);
+  });
+});
+
+/**
+ * A compile-time key guard: the literal must name *every* field of `T` exactly
+ * once, so a field added, removed or renamed in the interface breaks the build
+ * here — and the sorted list it returns is compared against the list the Rust
+ * side pins in `the_dtos_serialize_with_the_names_the_workspace_reads`, which
+ * is the only way either side notices that the other moved.
+ */
+function keysOf<T>(record: Record<keyof T, true>): string[] {
+  return Object.keys(record).sort();
+}
+
+describe("the DTO contract", () => {
+  it("names every field the way the Rust side serializes it", () => {
+    // `ReviewOutDto` … `ReviewScoreDto` are pinned from the other side by the
+    // `serde_json` contract test in `src-tauri/src/review_cmds.rs`; the last
+    // three are the `commands.rs` DTOs (the export request/answer and the undo).
+    expect(
+      keysOf<ReviewOutDto>({
+        sheet: true,
+        icons: true,
+        clusters: true,
+        outliers: true,
+        skipped: true,
+        flagged: true,
+        cascade: true,
+        renderMs: true,
+        detectMs: true,
+        triage: true,
+      }),
+    ).toEqual([
+      "cascade",
+      "clusters",
+      "detectMs",
+      "flagged",
+      "icons",
+      "outliers",
+      "renderMs",
+      "sheet",
+      "skipped",
+      "triage",
+    ]);
+
+    expect(
+      keysOf<ReviewIconDto>({
+        id: true,
+        index: true,
+        score: true,
+        flags: true,
+        nodeCount: true,
+        closed: true,
+        colours: true,
+        inkArea: true,
+        stat: true,
+        dHash: true,
+        aHash: true,
+        digest: true,
+        state: true,
+        cluster: true,
+        keeper: true,
+        outliers: true,
+      }),
+    ).toEqual([
+      "aHash",
+      "closed",
+      "cluster",
+      "colours",
+      "dHash",
+      "digest",
+      "flags",
+      "id",
+      "index",
+      "inkArea",
+      "keeper",
+      "nodeCount",
+      "outliers",
+      "score",
+      "stat",
+      "state",
+    ]);
+
+    expect(
+      keysOf<ReviewStatDto>({
+        inkSize: true,
+        stroke: true,
+        nodeCount: true,
+        colours: true,
+        solidity: true,
+        fillRatio: true,
+        palette: true,
+      }),
+    ).toEqual([
+      "colours",
+      "fillRatio",
+      "inkSize",
+      "nodeCount",
+      "palette",
+      "solidity",
+      "stroke",
+    ]);
+
+    expect(
+      keysOf<ReviewTriageDto>({
+        decided: true,
+        seq: true,
+        counts: true,
+        canUndo: true,
+        last: true,
+        csvBytes: true,
+      }),
+    ).toEqual(["canUndo", "counts", "csvBytes", "decided", "last", "seq"]);
+
+    expect(
+      keysOf<ReviewDecisionDto>({ index: true, icon: true, action: true, seq: true, atMs: true }),
+    ).toEqual(["action", "atMs", "icon", "index", "seq"]);
+
+    // A sheet-level deviation is the deviation's own fields plus the icon they
+    // belong to — flattened on the wire, so `extends` on this side is the
+    // matching shape.
+    expect(
+      keysOf<ReviewSheetOutlierDto>({
+        icon: true,
+        kind: true,
+        z: true,
+        value: true,
+        median: true,
+      }),
+    ).toEqual(["icon", "kind", "median", "value", "z"]);
+    expect(keysOf<ReviewOutlierDto>({ kind: true, z: true, value: true, median: true })).toEqual([
+      "kind",
+      "median",
+      "value",
+      "z",
+    ]);
+    expect(keysOf<ReviewSkippedDto>({ id: true, reason: true })).toEqual(["id", "reason"]);
+    expect(
+      keysOf<ReviewCascadeDto>({ candidates: true, verified: true, confirmed: true }),
+    ).toEqual(["candidates", "confirmed", "verified"]);
+    expect(keysOf<ReviewClusterDto>({ members: true, keeper: true, identical: true })).toEqual([
+      "identical",
+      "keeper",
+      "members",
+    ]);
+    expect(
+      keysOf<ReviewScoreDto>({ mae: true, ssim: true, iou: true, composite: true }),
+    ).toEqual(["composite", "iou", "mae", "ssim"]);
+
+    expect(
+      keysOf<ReviewUndoDto>({ triage: true, icon: true, restored: true }),
+    ).toEqual(["icon", "restored", "triage"]);
+    expect(keysOf<ReviewExportRequestDto>({ sheetId: true, outDir: true })).toEqual([
+      "outDir",
+      "sheetId",
+    ]);
+    expect(
+      keysOf<ReviewExportDto>({ csv: true, decisions: true, seq: true, path: true }),
+    ).toEqual(["csv", "decisions", "path", "seq"]);
+
+    console.log(
+      "evidence: review dto — 14 review DTOs pinned field-by-field on both sides of the " +
+        "bridge (ReviewOutDto, ReviewIconDto, ReviewStatDto, ReviewTriageDto, " +
+        "ReviewDecisionDto, the deviation/skip/cascade/cluster/score shapes, the export " +
+        "request+answer and the undo), so a renamed field fails a test instead of " +
+        "arriving as undefined",
+    );
   });
 });

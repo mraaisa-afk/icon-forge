@@ -1305,6 +1305,215 @@ mod tests {
         assert_eq!(last.seq, 1);
     }
 
+    /// Every JSON key the workspace reads, spelled out.
+    ///
+    /// The names are produced by `#[serde(rename_all = "camelCase")]` — a derive,
+    /// not a literal — so nothing in the Rust source says what the webview will
+    /// look for. `src/lib/reviewModel.ts` hand-mirrors these structs, and a
+    /// renamed field there would leave the TypeScript compiler perfectly happy
+    /// while the workspace read `undefined`: this test is the half that fails
+    /// instead. The TypeScript half is pinned by the matching test in
+    /// `src/lib/reviewModel.test.ts`, and both sides print their list as
+    /// evidence.
+    #[test]
+    fn the_dtos_serialize_with_the_names_the_workspace_reads() {
+        fn keys(value: &serde_json::Value) -> Vec<String> {
+            let mut keys: Vec<String> = value
+                .as_object()
+                .expect("a serialised struct is an object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        }
+
+        let (mut lib, mut session) = fresh();
+        decide(&mut session, &mut lib, 1, TriageActionDto::Approve);
+        let report = HostReview {
+            icons: vec![HostIconReview {
+                id: icon(1),
+                index: 0,
+                review: IconReview {
+                    id: 0,
+                    score: Score {
+                        mae: 0.01,
+                        ssim: 0.99,
+                        iou: 0.98,
+                        composite: 0.97,
+                    },
+                    flags: vec![QualityFlag::OpenContour],
+                    node_count: 12,
+                    closed: false,
+                    colours: 2,
+                    ink_area: 400,
+                    stat: IconStat {
+                        id: 0,
+                        ink_size: 20.0,
+                        stroke: 3.0,
+                        node_count: 12.0,
+                        colours: 2.0,
+                        solidity: 0.9,
+                        fill_ratio: 0.7,
+                        palette: 5,
+                    },
+                    d_hash: 0xFEDC_BA98_7654_3210,
+                    a_hash: 1,
+                    digest: [7u8; 32],
+                },
+            }],
+            clusters: vec![HostCluster {
+                members: vec![icon(1)],
+                keeper: icon(1),
+            }],
+            outliers: vec![HostOutlier {
+                id: icon(1),
+                flag: OutlierFlag {
+                    id: 0,
+                    kind: OutlierKind::Stroke,
+                    z: 4.5,
+                    value: 6.0,
+                    median: 3.0,
+                },
+            }],
+            skipped: vec![HostSkip {
+                id: icon(2),
+                reason: "no ink in its box".to_string(),
+            }],
+            flagged: 1,
+            cascade: CascadeCounts {
+                candidates: 6,
+                verified: 4,
+                confirmed: 2,
+            },
+            render_ms: 12.5,
+            detect_ms: 3.25,
+        };
+        let out = review_out(&report, &session);
+        let json = serde_json::to_value(&out).expect("the report serialises");
+
+        assert_eq!(
+            keys(&json),
+            vec![
+                "cascade", "clusters", "detectMs", "flagged", "icons", "outliers", "renderMs",
+                "sheet", "skipped", "triage"
+            ]
+        );
+        let icon_json = &json["icons"][0];
+        assert_eq!(
+            keys(icon_json),
+            vec![
+                "aHash",
+                "closed",
+                "cluster",
+                "colours",
+                "dHash",
+                "digest",
+                "flags",
+                "id",
+                "index",
+                "inkArea",
+                "keeper",
+                "nodeCount",
+                "outliers",
+                "score",
+                "stat",
+                "state"
+            ]
+        );
+        assert_eq!(
+            keys(&icon_json["stat"]),
+            vec![
+                "colours",
+                "fillRatio",
+                "inkSize",
+                "nodeCount",
+                "palette",
+                "solidity",
+                "stroke"
+            ]
+        );
+        assert_eq!(
+            keys(&json["triage"]),
+            vec!["canUndo", "counts", "csvBytes", "decided", "last", "seq"]
+        );
+        assert_eq!(
+            keys(&json["triage"]["last"]),
+            vec!["action", "atMs", "icon", "index", "seq"]
+        );
+        // A sheet-level deviation is flattened, so it carries its own icon id
+        // beside the deviation's fields rather than nested under one.
+        assert_eq!(
+            keys(&json["outliers"][0]),
+            vec!["icon", "kind", "median", "value", "z"]
+        );
+        assert_eq!(
+            keys(&json["icons"][0]["outliers"][0]),
+            vec!["kind", "median", "value", "z"],
+            "the per-icon list is already attached to its icon"
+        );
+        assert_eq!(keys(&json["skipped"][0]), vec!["id", "reason"]);
+        assert_eq!(
+            keys(&json["cascade"]),
+            vec!["candidates", "confirmed", "verified"]
+        );
+        assert_eq!(
+            keys(&json["clusters"][0]),
+            vec!["identical", "keeper", "members"]
+        );
+        assert_eq!(
+            keys(&json["icons"][0]["score"]),
+            vec!["composite", "iou", "mae", "ssim"]
+        );
+
+        // The negative half: the Rust names must not leak through. A missing
+        // rename would otherwise be invisible on both sides.
+        for snake in [
+            "render_ms",
+            "detect_ms",
+            "node_count",
+            "ink_area",
+            "d_hash",
+            "a_hash",
+            "csv_bytes",
+            "can_undo",
+            "at_ms",
+            "ink_size",
+            "fill_ratio",
+        ] {
+            assert!(
+                json.get(snake).is_none() && icon_json.get(snake).is_none(),
+                "{snake} reached the webview somewhere"
+            );
+        }
+        assert!(
+            json["triage"]
+                .as_object()
+                .expect("the triage state is an object")
+                .contains_key("last"),
+            "a decision was made, so `last` is present"
+        );
+
+        // The hashes travel as 16-char hex text, which is why the workspace can
+        // compare two of them exactly (JSON numbers stop being exact at 2⁵³).
+        assert_eq!(icon_json["dHash"], "fedcba9876543210");
+        assert_eq!(icon_json["aHash"], "0000000000000001");
+        assert_eq!(icon_json["stat"]["palette"], "0000000000000005");
+        assert!(icon_json["dHash"].is_string(), "a hash is an identity");
+
+        // `last` is absent — not null — when nothing has been decided, because
+        // the TS side types it `last?: ReviewDecisionDto`.
+        let (lib2, session2) = fresh();
+        let empty = serde_json::to_value(review_out(&HostReview::empty(Vec::new()), &session2))
+            .expect("an empty report serialises");
+        assert!(
+            !keys(&empty["triage"]).contains(&"last".to_string()),
+            "an undecided session omits `last` rather than sending null: {:?}",
+            empty["triage"]
+        );
+        drop(lib2);
+    }
+
     #[test]
     fn an_empty_pass_reports_an_empty_sheet() {
         let (_lib, live) = fresh();

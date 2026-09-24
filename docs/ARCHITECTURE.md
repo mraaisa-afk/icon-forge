@@ -336,6 +336,52 @@ the forward sweep had reached, which made a 1.33 px wall difference read as
 
 **The log is rebuilt from a journal, so triage survives a restart.** Every decision and every undo is appended to `review_log` as an event — `review/apply action=<name> index=<row> seq=<n> at=<ms>` or `review/undo at=<ms>` — filed under a 17-byte key (`0x52` then the sheet id), which no 16-byte icon id can equal: one sheet's session and its own icons' audit rows share the table without ever sharing a key. Loading a session replays that sheet's events through the same `TriageLog` the live pass used, and *verifies* each event's recorded sequence number against the number the replay hands out — a journal that does not reproduce its own numbering is reported as corruption rather than replayed into a plausible-looking log. Undo is an event like any other, so a session that closed mid-review reopens with the same decisions *and* the same undo stack, and the icon's `review_state` column is written in the same step (a decision sets it; an undo restores what the replaced decision had put there, or `pending`).
 
+**The workspace is the triage surface, and it is decisions rather than pixels.** The
+screen takes the main area while it is open and virtualizes its list with the same
+`virtualWindow` arithmetic the library grid uses, because §8's target is 1000 icons and a
+browser that lays out 1000 rows on every keystroke is what makes a triage session slow.
+§3.6's six chords are bound at the window — `A` / `R` / `F` / `D`, `Space` for the sheet
+crop overlay, `Shift+A` to approve what is left, `Ctrl+Z` to undo — plus `↑`/`↓` (or
+`j`/`k`) to move, `Esc` to dismiss, and `Shift+E` for a CSV preview. The bare letter is
+required on purpose: `Ctrl+R` reloads a browser tab and `Cmd+A` selects a page, so a
+command that also took them would either never fire or fire while the reviewer was doing
+something else. Keystrokes aimed at a text field are ignored, which is what keeps the
+export path box from approving icons as it is typed into. All of it — the chord table,
+the filter tabs, the ordering, the pace projection — lives in `src/lib/reviewModel.ts` as
+pure functions, because vitest's environment here is node and a shortcut table only
+exercisable by mounting a browser is not exercisable at all.
+
+**The cursor and the filters are the reviewer's, the log's numbers are the backend's.**
+The list is ordered worst-first (a non-keeper cluster member, then a quality flag, then a
+deviation, then anything undecided, then the decided rows) with ties broken by sheet row,
+so two runs of one report show the same list; the tabs filter it by what the detectors
+found and carry their counts. After a decision the cursor steps over rows that are
+already decided and never wraps — reaching the end and stopping is how the screen says
+"that is the sheet" — and an undo puts it back on the row it changed, because undoing is
+how a reviewer looks at something again rather than how they walk the list. The row's chip
+is patched locally so the list does not flicker, but the *state* is the command's answer:
+`sequence` numbers and `csvBytes` are never computed in TypeScript, and an undone row is
+repainted from the `restored` field of the undo's own reply, since `TriageStateOut::last`
+after an undo may name another icon entirely. The pass is a command rather than a job, it
+is cached per sheet (reopening the workspace does not pay 17 s again), and a decision does
+not need it at all: `review_state` replays the journal, so the card can say what a sheet
+already holds before anyone runs anything.
+
+**Two contract tests pin the bridge, because the names are the interface.** `dHash`,
+`aHash` and `stat.palette` reach the webview as 16-char hex rather than as `u64`s — JSON
+numbers stop being exact at 2⁵³, and a hash is an identity rather than a quantity, so two
+values differing in their low bits must not arrive equal — and the sheet-level deviation
+list carries its icon's id (`SheetOutlierOut` flattens the deviation beside it) so a
+reader can attribute what it is reading. Those names come from
+`#[serde(rename_all = "camelCase")]`, a derive rather than a literal, so
+`the_dtos_serialize_with_the_names_the_workspace_reads` serialises a full report and
+asserts the key set of every DTO (including that `last` is absent, not null, when nothing
+has been decided), and `src/lib/reviewModel.test.ts` pins the TypeScript side field by
+field with a record keyed by `keyof` each interface; both print their list as CI evidence.
+The workspace's own layout is still verified by the build and by running it, not by a
+renderer test — that is the honest boundary of a node-environment suite, and adding a DOM
+environment is a separate decision rather than a line in this one.
+
 **The quality composite comes from stage ⑧ at 2× cell.** `LowQuality` is defined on the composite, so the review calls `score_svg` — the sheet's real crop at 2× cell against the icon's own document — rather than re-deriving the metric at another scale, which would let the review panel disagree with the score the user already sees next to the same icon. `OverComplex` compares the outline's segment count against `4·√ink-area`, and an icon with no ink is never over-complex (its budget is zero).
 
 ---
