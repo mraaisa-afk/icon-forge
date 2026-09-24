@@ -10,6 +10,10 @@ requires the gate to reject every one of them for the stated reason.
 
 Exits non-zero if any mutation survives the gate, or if the unmutated copy is
 rejected (a gate that fails everything proves nothing either).
+
+The gate's `cargo tree` half needs a resolvable registry; in a sandbox without
+one, export `ISG_OFFLINE_ALLOW_NO_GRAPH=1` to let that half report itself as
+unavailable instead of failing. CI never sets it.
 """
 
 from __future__ import annotations
@@ -63,11 +67,19 @@ def add_dependency(dest: Path) -> str:
     return f"{manifest.relative_to(dest)} gains a direct reqwest dependency"
 
 
-def add_transitive_dependency(dest: Path) -> str:
-    (dest / "Cargo.lock").write_text(
-        'version = 4\n\n[[package]]\nname = "hyper"\nversion = "1.0.0"\n', encoding="utf-8"
-    )
-    return "Cargo.lock gains hyper as a transitive dependency"
+def add_shell_dependency(dest: Path) -> str:
+    """The shell is where a network capability would realistically creep in.
+
+    It is checked through the manifests rather than the resolved graph: the
+    graph of a Tauri shell legitimately contains the framework's runtime, and
+    the lock file cannot tell an enabled feature from an optional one.
+    """
+    manifest = dest / "src-tauri" / "Cargo.toml"
+    text = manifest.read_text(encoding="utf-8")
+    patched = text.replace('[dependencies]\n', '[dependencies]\nreqwest = "0.12"\n', 1)
+    assert patched != text, "could not add a dependency to the shell manifest"
+    manifest.write_text(patched, encoding="utf-8")
+    return "src-tauri/Cargo.toml declares an HTTP client"
 
 
 def add_remote_fetch(dest: Path) -> str:
@@ -106,7 +118,7 @@ def retarget_allow_list(dest: Path) -> str:
 
 MUTATIONS = [
     ("O1-direct-dependency", add_dependency, "socket or speak HTTP"),
-    ("O1-transitive-dependency", add_transitive_dependency, "socket or speak HTTP"),
+    ("O1-shell-dependency", add_shell_dependency, "declares `reqwest`"),
     ("O2-remote-fetch", add_remote_fetch, "not on this machine"),
     ("O2-socket-api", add_socket_use, "std::net"),
     ("O3-permissive-csp", open_csp, "CSP allows https:"),
