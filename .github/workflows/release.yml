@@ -118,10 +118,6 @@ jobs:
             echo "evidence: phase7 P1 installer=$(basename "$installer") bytes=$bytes mb=$mb"
             echo "evidence: phase7 P2 webview2_offline=embedded install_mode=currentUser sha256=$digest"
           } | tee target/release-evidence.txt
-          echo "::notice title=Icon Forge installer::$(
-            printf '%s' "$(cat target/release-evidence.txt)" \
-              | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
-          )"
 
       # The size check above is an inference: a large installer *should* contain
       # the WebView2 payload. This one looks inside it. 7-Zip reads the NSIS
@@ -142,17 +138,39 @@ jobs:
             exit 0
           fi
           list=$("$seven" l "$installer" 2>/dev/null || true)
-          entries=$(printf '%s' "$list" | grep -cE '^\([0-9]|^ *[0-9]+ +[0-9]' || true)
-          payload=$(printf '%s' "$list" | grep -iE 'webview2|edgewebview' | head -5 || true)
+          # 7-Zip's NSIS listing prints one line per entry, each starting with a
+          # `YYYY-MM-DD HH:MM:SS` timestamp.
+          entries=$(printf '%s\n' "$list" | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' || true)
+          payload=$(printf '%s\n' "$list" | grep -iE 'webview2|edgewebview' || true)
           if [ -z "$payload" ]; then
             echo "evidence: phase7 P3 inspection=no-webview2-entry entries=$entries" \
               | tee -a target/release-evidence.txt
             exit 0
           fi
+          # `grep -c .` counts the lines; `wc -l` on a no-trailing-newline string
+          # reports zero, which is what the first run of this step printed while
+          # showing the payload right underneath it.
+          count=$(printf '%s\n' "$payload" | grep -c . || true)
           {
-            echo "evidence: phase7 P3 webview2_payload_files=$(printf '%s' "$payload" | wc -l) entries=$entries"
+            echo "evidence: phase7 P3 embedded_webview2_installers=$count archive_entries=$entries"
             printf '%s\n' "$payload" | sed 's/^/  /'
           } | tee -a target/release-evidence.txt
+
+      # Its own step, after every evidence line exists: the first run published a
+      # notice that could not contain P3, because the notice was written by the
+      # step before the inspection ran.
+      - name: Publish the installer evidence (API-readable)
+        if: always()
+        shell: bash
+        run: |
+          body=$(cat target/release-evidence.txt 2>/dev/null || true)
+          if [ -z "$body" ]; then
+            echo "no installer evidence was produced" >&2
+            exit 1
+          fi
+          echo "::notice title=Icon Forge installer::$(
+            printf '%s' "$body" | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
+          )"
 
       - name: Upload the installer
         uses: actions/upload-artifact@v4
