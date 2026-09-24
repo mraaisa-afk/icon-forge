@@ -9,6 +9,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // When the UI is previewed from a remote workspace it is proxied under a
+    // per-sandbox host (`…e2b.app`). Vite 5 answers an unknown Host header with
+    // 403, so this domain is allowed explicitly rather than switching the check
+    // off: `npm run dev` on a developer's own machine still rejects anything
+    // that is not localhost.
+    allowedHosts: [".e2b.app"],
   },
   build: {
     target: "es2021",

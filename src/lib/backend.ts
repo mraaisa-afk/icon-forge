@@ -15,6 +15,17 @@ export type Box4 = readonly [number, number, number, number];
 
 import type { GroupingDto, SensitivityDto, SheetPreviewDto, SplitHereDto } from "./groupModel";
 import {
+  parseAction,
+  TRIAGE_ACTIONS,
+  type ReviewExportDto,
+  type ReviewExportRequestDto,
+  type ReviewIconDto,
+  type ReviewOutDto,
+  type ReviewTriageDto,
+  type ReviewUndoDto,
+  type TriageActionName,
+} from "./reviewModel";
+import {
   clampSpec,
   cv,
   DEFAULT_CSV,
@@ -137,6 +148,22 @@ interface Backend {
   sheetCsvPreview(request: SheetPlanRequest, csv: SheetCsvDto): Promise<SheetCsvPreviewDto>;
   /** Writes the sheet's files and reports the second reader each one passed. */
   sheetExport(request: SheetExportRequest): Promise<SheetExportDto>;
+
+  // Phase 6 review (§3.6): the pass, the triage decisions, `review.csv`.
+  /** Runs the review pass over one sheet (seconds of work on a real sheet). */
+  reviewRun(sheetId: string): Promise<ReviewOutDto>;
+  /** Records one decision and answers with the log's new state. */
+  reviewApply(
+    sheetId: string,
+    iconId: string,
+    action: TriageActionName | "bulk" | string,
+  ): Promise<ReviewTriageDto>;
+  /** Takes back the most recent decision; `null` when there is none left. */
+  reviewUndo(sheetId: string): Promise<ReviewUndoDto | null>;
+  /** Renders `review.csv`, writing it when `outDir` is given. */
+  reviewExport(request: ReviewExportRequestDto): Promise<ReviewExportDto>;
+  /** The triage state alone — what the workspace re-reads after a reload. */
+  reviewState(sheetId: string): Promise<ReviewTriageDto>;
 }
 
 // ---- Tauri backend -------------------------------------------------------
@@ -208,6 +235,24 @@ async function tauriBackend(): Promise<Backend> {
     },
     async sheetExport(request) {
       return invoke<SheetExportDto>("sheet_export", { req: request });
+    },
+    // Phase 6. The action travels as the string the command parses, so `A` and
+    // `approve` are both accepted on the native side and the workspace does not
+    // have to know which spelling the DTO uses.
+    async reviewRun(sheetId) {
+      return invoke<ReviewOutDto>("review_run", { sheetId });
+    },
+    async reviewApply(sheetId, iconId, action) {
+      return invoke<ReviewTriageDto>("review_apply", { sheetId, iconId, action });
+    },
+    async reviewUndo(sheetId) {
+      return invoke<ReviewUndoDto | null>("review_undo", { sheetId });
+    },
+    async reviewExport(request) {
+      return invoke<ReviewExportDto>("review_export", { req: request });
+    },
+    async reviewState(sheetId) {
+      return invoke<ReviewTriageDto>("review_state", { sheetId });
     },
   };
 }
@@ -329,6 +374,102 @@ function mockPlan(request: SheetPlanRequest, count: number): SheetPlanDto {
   };
 }
 
+/**
+ * One decision in the mock's log. Natively the log is keyed by the sheet *row*
+ * and the session maps rows to icon ids; the mock carries both, so a decision
+ * can name the id the workspace knows without re-deriving it.
+ */
+interface MockDecision {
+  icon: string;
+  action: TriageActionName;
+  seq: number;
+  atMs: number;
+}
+
+/**
+ * The browser stand-in for `TriageLog` — and it follows the same rules, because
+ * the workspace is developed and tested against it: one *current* decision per
+ * row, an undo history that puts back what was there before, sequence numbers
+ * that never go backwards, and `review.csv` with the same `seq,id,action,at_ms`
+ * columns and RFC 4180 line endings the native export writes.
+ */
+class MockTriageLog {
+  private decisions = new Map<number, MockDecision>();
+  /** `(row, what was there before)`, oldest first — `TriageLog::history`. */
+  private history: Array<{ row: number; previous: MockDecision | null }> = [];
+  private nextSeq = 1;
+
+  get canUndo(): boolean {
+    return this.history.length > 0;
+  }
+
+  get size(): number {
+    return this.decisions.size;
+  }
+
+  apply(row: number, icon: string, action: TriageActionName, atMs: number): number {
+    const seq = this.nextSeq;
+    this.nextSeq += 1;
+    const previous = this.decisions.get(row) ?? null;
+    this.decisions.set(row, { icon, action, seq, atMs });
+    this.history.push({ row, previous });
+    return seq;
+  }
+
+  undo(): { row: number; decision: MockDecision | null } | null {
+    const entry = this.history.pop();
+    if (!entry) return null;
+    if (entry.previous) this.decisions.set(entry.row, entry.previous);
+    else this.decisions.delete(entry.row);
+    return { row: entry.row, decision: entry.previous };
+  }
+
+  actionOf(row: number): TriageActionName | null {
+    return this.decisions.get(row)?.action ?? null;
+  }
+
+  /** The export, byte-for-byte what the native `to_csv` would write. */
+  csv(): string {
+    const rows = [...this.decisions.entries()].sort((a, b) => a[1].seq - b[1].seq);
+    let out = "seq,id,action,at_ms\r\n";
+    for (const [row, decision] of rows) {
+      out += `${decision.seq},${row},${decision.action},${decision.atMs}\r\n`;
+    }
+    return out;
+  }
+
+  state(): ReviewTriageDto {
+    const counts: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+    let lastRow = -1;
+    let last: MockDecision | null = null;
+    for (const [row, decision] of this.decisions) {
+      counts[TRIAGE_ACTIONS.indexOf(decision.action)] += 1;
+      if (!last || decision.seq > last.seq) {
+        last = decision;
+        lastRow = row;
+      }
+    }
+    return {
+      decided: this.decisions.size,
+      seq: this.nextSeq,
+      counts,
+      canUndo: this.canUndo,
+      ...(last
+        ? {
+            last: {
+              index: lastRow,
+              icon: last.icon,
+              action: last.action,
+              seq: last.seq,
+              atMs: last.atMs,
+            },
+          }
+        : {}),
+      csvBytes: this.csv().length,
+    };
+  }
+}
+
 class MockBackend implements Backend {
   private sheets: SheetDto[] = [];
   private icons = new Map<string, IconDto[]>();
@@ -340,6 +481,8 @@ class MockBackend implements Backend {
   private groupingSeen = new Set<string>();
   private groupingSensitivity = new Map<string, SensitivityDto>();
   private previews = new Map<string, SheetPreviewDto>();
+  /** One triage log per sheet, so the mock keeps its decisions like the file does. */
+  private reviewLogs = new Map<string, MockTriageLog>();
 
   private require(): true {
     if (this.path === null) throw new Error("no project is open (browser mock)");
@@ -357,6 +500,7 @@ class MockBackend implements Backend {
     this.groupingSensitivity.clear();
     this.previews.clear();
     this.icons.clear();
+    this.reviewLogs.clear();
   }
 
   async projectOpen(path: string): Promise<ProjectInfo> {
@@ -391,6 +535,20 @@ class MockBackend implements Backend {
         await new Promise((r) => setTimeout(r, 120));
         this.emit({ kind: "progress", id, done: i * 20, total: 100, message: "importing (mock)" });
       }
+      // Two synthetic sheets, derived from the folder so the same path imports
+      // the same sheet ids. The native import reads the folder; a mock that
+      // imports nothing leaves every screen behind the library grid (the sheet
+      // drawer, the comparator, the review workspace) unreachable in a plain
+      // `vite dev` session, which is the one session the mock exists for.
+      const dir = root.replace(/[\\/]+$/, "");
+      this.sheets = ["sheet_a", "sheet_b"].map((stem, index) => ({
+        id: this.mockHash(`${dir}/${stem}`, index) + this.mockHash(stem, index + 1),
+        sourcePath: `${dir}/${stem}.png`,
+        contentHash: this.mockHash(`${stem}:content`, index) + this.mockHash(dir, index + 7),
+        width: 256 + index * 64,
+        height: 192 + index * 48,
+        importedAt: String(Date.now()),
+      }));
       this.emit({
         kind: "finished",
         id,
@@ -803,6 +961,174 @@ class MockBackend implements Backend {
       });
     }
     return { plan, files };
+  }
+
+  // ---- Phase 6 review ----------------------------------------------------
+
+  /** The log for a sheet, created on first use like the table's empty journal. */
+  private reviewLog(sheetId: string): MockTriageLog {
+    let log = this.reviewLogs.get(sheetId);
+    if (!log) {
+      log = new MockTriageLog();
+      this.reviewLogs.set(sheetId, log);
+    }
+    return log;
+  }
+
+  /**
+   * 16 hex chars derived from a string — the mock's stand-in for a hash.
+   *
+   * Both halves are forced through `>>> 0`: JavaScript's bitwise operators work
+   * on *signed* 32-bit integers, so `state ^ salt` can come back negative and
+   * `toString(16)` then renders `-8e86732` — a 31-character id, which is not a
+   * 32-hex id at all.
+   */
+  private mockHash(text: string, salt: number): string {
+    let state = (0x811c9dc5 ^ salt) >>> 0;
+    for (let i = 0; i < text.length; i += 1) {
+      state = Math.imul(state ^ text.charCodeAt(i), 0x01000193) >>> 0;
+    }
+    const other = (state ^ 0x5bf03635) >>> 0;
+    return state.toString(16).padStart(8, "0") + other.toString(16).padStart(8, "0");
+  }
+
+  /**
+   * The mock's review pass over the rows `vectorizeSheetSubmit` left behind.
+   *
+   * It is synthetic but it is *shaped* like the real report: a duplicate cluster
+   * whose two members share both hashes and a digest, one icon with an
+   * open-contour flag and a stroke deviation, one over-complex pair of numbers,
+   * and a skip. The workspace is developed against these, so the mock has to
+   * exercise every branch the real detector output can take.
+   */
+  private mockReviewRows(sheetId: string): ReviewIconDto[] {
+    const rows = this.icons.get(sheetId) ?? [];
+    const log = this.reviewLog(sheetId);
+    return rows.map((row, i) => {
+      const [, , w] = row.bbox;
+      const twin = i === 0 || i === 1;
+      const digest = twin ? this.mockHash(sheetId, 7) + "0".repeat(32) : this.mockHash(sheetId, 7 + i) + "1".repeat(32);
+      const dHash = twin ? this.mockHash(sheetId, 11) : this.mockHash(`${row.id}`, 11);
+      const aHash = twin ? this.mockHash(sheetId, 13) : this.mockHash(`${row.id}`, 13);
+      return {
+        id: row.id,
+        index: i,
+        score: {
+          mae: row.mae,
+          ssim: row.ssim,
+          iou: row.iou,
+          composite: Math.min(1, 0.5 * row.ssim + 0.3 * row.iou + 0.2 * (1 - row.mae)),
+        },
+        flags: i === 2 ? ["open-contour"] : i === 3 ? ["over-complex"] : [],
+        nodeCount: 8 + i * 4,
+        closed: i !== 2,
+        colours: 1 + (i % 2),
+        inkArea: Math.max(1, w * (row.bbox[3] ?? 1)),
+        stat: {
+          inkSize: Math.max(1, w),
+          stroke: Math.max(0.5, w / 10),
+          nodeCount: 8 + i * 4,
+          colours: 1 + (i % 2),
+          solidity: 0.98 - i / 100,
+          fillRatio: twin ? 1 : 0.94 - i / 50,
+          palette: this.mockHash(`${row.id}:palette`, 17) + "0".repeat(16),
+        },
+        dHash,
+        aHash,
+        digest,
+        state: log.actionOf(i) ?? "pending",
+        ...(twin
+          ? {
+              cluster: {
+                members: rows
+                  .slice(0, 2)
+                  .map((r) => r.id)
+                  .sort(),
+                keeper: rows[1].id,
+                identical: true,
+              },
+            }
+          : {}),
+        keeper: twin && i === 1,
+        outliers:
+          i === 2
+            ? [{ kind: "stroke", z: 3.9, value: Math.max(1, w / 10) * 1.8, median: Math.max(1, w / 10) }]
+            : [],
+      };
+    });
+  }
+
+  async reviewRun(sheetId: string): Promise<ReviewOutDto> {
+    this.require();
+    const icons = this.mockReviewRows(sheetId);
+    const log = this.reviewLog(sheetId);
+    // The deviations again, sheet-level, with the icon each belongs to.
+    const outliers = icons.flatMap((icon) =>
+      icon.outliers.map((flag) => ({ icon: icon.id, ...flag })),
+    );
+    return {
+      sheet: sheetId,
+      icons,
+      clusters: icons.flatMap((icon) => (icon.cluster && icon.keeper ? [icon.cluster] : [])),
+      outliers,
+      skipped: icons.length === 0 ? [{ id: "0".repeat(32), reason: "the sheet has no icons yet (mock)" }] : [],
+      flagged: icons.filter((icon) => icon.flags.length > 0).length,
+      cascade: {
+        candidates: icons.filter((icon) => icon.cluster).length * 3,
+        verified: icons.filter((icon) => icon.cluster).length * 2,
+        confirmed: icons.filter((icon) => icon.cluster).length,
+      },
+      renderMs: icons.length * 0.9,
+      detectMs: icons.length * 2.4,
+      triage: log.state(),
+    };
+  }
+
+  async reviewApply(
+    sheetId: string,
+    iconId: string,
+    action: string,
+  ): Promise<ReviewTriageDto> {
+    this.require();
+    const parsed = parseAction(action);
+    if (!parsed) throw new Error(`unknown triage action: ${action}`);
+    const icons = this.mockReviewRows(sheetId);
+    const row = icons.findIndex((icon) => icon.id === iconId);
+    if (row === -1) throw new Error(`icon ${iconId} is not part of sheet ${sheetId}`);
+    this.reviewLog(sheetId).apply(row, iconId, parsed, Date.now());
+    return this.reviewLog(sheetId).state();
+  }
+
+  async reviewUndo(sheetId: string): Promise<ReviewUndoDto | null> {
+    this.require();
+    const log = this.reviewLog(sheetId);
+    const undone = log.undo();
+    if (!undone) return null;
+    const rows = this.icons.get(sheetId) ?? [];
+    const icon = rows[undone.row]?.id ?? undone.decision?.icon ?? "";
+    return {
+      triage: log.state(),
+      icon,
+      restored: undone.decision?.action ?? "pending",
+    };
+  }
+
+  async reviewExport(request: ReviewExportRequestDto): Promise<ReviewExportDto> {
+    this.require();
+    const log = this.reviewLog(request.sheetId);
+    const csv = log.csv();
+    const dir = request.outDir?.replace(/[\\/]+$/, "");
+    return {
+      csv,
+      decisions: log.size,
+      seq: log.state().seq,
+      ...(dir ? { path: `${dir}/review-${request.sheetId}.csv` } : {}),
+    };
+  }
+
+  async reviewState(sheetId: string): Promise<ReviewTriageDto> {
+    this.require();
+    return this.reviewLog(sheetId).state();
   }
 
   async onJobEvent(listener: Listener): Promise<() => void> {

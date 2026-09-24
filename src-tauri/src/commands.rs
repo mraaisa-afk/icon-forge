@@ -1820,6 +1820,10 @@ pub struct UndoDto {
     pub triage: TriageStateOut,
     /// 32-char hex of the icon whose decision was undone.
     pub icon: String,
+    /// The library state that icon went back to (`pending` when it had no
+    /// earlier decision), so the workspace can redraw that one row without
+    /// asking for the whole sheet again.
+    pub restored: String,
 }
 
 /// The review pass's export request.
@@ -1940,12 +1944,11 @@ pub fn review_undo(state: State<'_, App>, sheet_id: String) -> CmdResult<Option<
         });
     };
     let mut session = review_session(lib, id)?;
-    Ok(
-        undo_decision(&mut session, lib)?.map(|(triage, icon)| UndoDto {
-            triage,
-            icon: crate::review_cmds::hex32(icon),
-        }),
-    )
+    Ok(undo_decision(&mut session, lib)?.map(|outcome| UndoDto {
+        triage: outcome.triage,
+        icon: crate::review_cmds::hex32(outcome.icon),
+        restored: outcome.restored.as_str().to_string(),
+    }))
 }
 
 /// Renders `review.csv` (and writes it, when `outDir` is given).

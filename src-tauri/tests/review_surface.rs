@@ -150,10 +150,16 @@ fn a_session_survives_a_reopen_with_its_states_and_its_journal() {
 
     // Undo takes the last one back in both records: the icon is pending again
     // and the journal still remembers both the decision and its reversal.
-    let (state, undone) = undo_decision(&mut session, &mut lib)
+    let outcome = undo_decision(&mut session, &mut lib)
         .expect("an undo")
         .expect("four decisions were made");
+    let (state, undone) = (outcome.triage.clone(), outcome.icon);
     assert_eq!(undone, ids[3]);
+    assert_eq!(
+        outcome.restored,
+        ReviewState::Pending,
+        "the duplicate had no earlier decision to go back to"
+    );
     assert_eq!(state.decided, 3);
     assert_eq!(state.counts, [1, 1, 1, 0, 0]);
     assert_eq!(
@@ -222,10 +228,16 @@ fn a_session_survives_a_reopen_with_its_states_and_its_journal() {
 
     // The reloaded session can still undo, and the undo reaches the file too.
     let mut reloaded = reloaded;
-    let (state, undone) = undo_decision(&mut reloaded, &mut lib)
+    let outcome = undo_decision(&mut reloaded, &mut lib)
         .expect("an undo")
         .expect("two decisions are left");
+    let (state, undone) = (outcome.triage.clone(), outcome.icon);
     assert_eq!(undone, ids[2]);
+    assert_eq!(
+        outcome.restored,
+        ReviewState::Pending,
+        "icon 3 carries no earlier decision, so taking the flag back leaves it undecided"
+    );
     assert_eq!(state.counts, [1, 1, 0, 0, 0]);
     drop(lib);
     let lib = Library::open(&db).expect("the project reopens again");

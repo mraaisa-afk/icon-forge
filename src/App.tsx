@@ -3,6 +3,7 @@ import { Toolbar } from "./components/Toolbar";
 import { JobBar } from "./components/JobBar";
 import { LibraryGrid } from "./components/library/LibraryGrid";
 import { SheetPanel } from "./components/sheet/SheetPanel";
+import { ReviewWorkspace } from "./components/review/ReviewWorkspace";
 import { EditorWorkbench } from "./components/editor/EditorWorkbench";
 import { useStore } from "./state/store";
 import { useEditor } from "./state/editorStore";
@@ -12,6 +13,7 @@ export function App() {
   const selectedSheet = useStore((s) => s.selectedSheet);
   const startEventPump = useStore((s) => s.startEventPump);
   const editorOpen = useEditor((s) => s.status !== "closed");
+  const reviewOpen = useStore((s) => s.reviewOpen);
 
   useEffect(() => {
     startEventPump();
@@ -23,8 +25,17 @@ export function App() {
       <div className="flex min-h-0 flex-1">
         {project ? (
           <>
-            <div className="min-h-0 flex-1">
-              {editorOpen ? <EditorWorkbench /> : <LibraryGrid />}
+            <div className="flex min-h-0 flex-1">
+              {/* Triage takes the whole area: §3.6's budget is 1000 icons, and
+                  a list that competes with the library for width is slower to
+                  read than one that does not. */}
+              {reviewOpen ? (
+                <ReviewWorkspace />
+              ) : editorOpen ? (
+                <EditorWorkbench />
+              ) : (
+                <LibraryGrid />
+              )}
             </div>
             {selectedSheet && <SheetPanel />}
           </>

@@ -135,7 +135,7 @@ impl From<Score> for ScoreOut {
 }
 
 /// The per-icon numbers the outlier detector read.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatOut {
     /// `√ink area` in pixels.
@@ -150,8 +150,13 @@ pub struct StatOut {
     pub solidity: f32,
     /// Ink area over box area.
     pub fill_ratio: f32,
-    /// The folded palette hash.
-    pub palette: u64,
+    /// The folded palette hash, as 16-char lowercase hex.
+    ///
+    /// A hash is an identity, not a quantity, and JSON numbers stop being exact
+    /// in the webview at 2⁵³ — a `u64` would reach the workspace already rounded,
+    /// so two palettes that differ in their low bits could compare equal. Hex
+    /// text has no such edge.
+    pub palette: String,
 }
 
 /// One reviewed icon.
@@ -176,10 +181,11 @@ pub struct IconReviewOut {
     pub ink_area: u64,
     /// The numbers the outlier detector read.
     pub stat: StatOut,
-    /// dHash of the normalised cell.
-    pub d_hash: u64,
-    /// aHash of the normalised cell.
-    pub a_hash: u64,
+    /// dHash of the normalised cell, as 16-char lowercase hex (see
+    /// [`StatOut::palette`] for why these are text).
+    pub d_hash: String,
+    /// aHash of the normalised cell, as 16-char lowercase hex.
+    pub a_hash: String,
     /// 64-char hex of the cell's blake3 digest.
     pub digest: String,
     /// The triage decision so far: a triage action name, or `pending`.
@@ -206,6 +212,22 @@ pub struct ClusterOut {
     /// and a UI that shows a "variant" pair as identical artwork would be
     /// asserting something the detectors never claimed.
     pub identical: bool,
+}
+
+/// One deviation of one icon, as the sheet-level list reports it.
+///
+/// The per-icon lists inside [`IconReviewOut::outliers`] need no id — they are
+/// already attached to the icon that carries them — but this flat list is what
+/// answers "how many deviations does this sheet have, and where", and a list a
+/// reader cannot attribute is not answerable. Hence the id.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetOutlierOut {
+    /// 32-char hex of the icon the deviation belongs to.
+    pub icon: String,
+    /// The deviation itself.
+    #[serde(flatten)]
+    pub flag: OutlierOut,
 }
 
 /// One deviation.
@@ -279,6 +301,24 @@ pub struct TriageStateOut {
     pub csv_bytes: usize,
 }
 
+/// What an undo did.
+///
+/// The restored state cannot be read back out of [`TriageStateOut`]: its `last`
+/// holds the highest sequence number still in the log, which after an undo may
+/// belong to another icon entirely. An undo that named only *which* icon changed
+/// would leave the workspace unable to redraw that one row — and the row it
+/// cannot redraw is exactly the one it just took back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UndoOutcome {
+    /// The log's state after the undo.
+    pub triage: TriageStateOut,
+    /// The icon whose decision was taken back.
+    pub icon: [u8; 16],
+    /// The library state the icon went back to (`pending` when it had no
+    /// earlier decision to restore).
+    pub restored: ReviewState,
+}
+
 /// One sheet's review, ready for the webview.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,8 +329,8 @@ pub struct ReviewOut {
     pub icons: Vec<IconReviewOut>,
     /// Duplicate clusters.
     pub clusters: Vec<ClusterOut>,
-    /// The deviations that made the outlier list.
-    pub outliers: Vec<OutlierOut>,
+    /// The deviations that made the outlier list, each naming its icon.
+    pub outliers: Vec<SheetOutlierOut>,
     /// Every icon the pass left out, with the reason.
     pub skipped: Vec<SkippedOut>,
     /// How many icons carry at least one quality flag.
@@ -393,6 +433,15 @@ pub fn hex32(id: [u8; 16]) -> String {
 #[must_use]
 pub fn hex64(digest: [u8; 32]) -> String {
     hex_of(&digest)
+}
+
+/// 16-char lowercase hex of a 64-bit hash.
+///
+/// Distinct from [`hex64`]: that one renders a 32-*byte* digest, this one a
+/// single `u64` — the two names are a byte count either way.
+#[must_use]
+pub fn hex64_num(value: u64) -> String {
+    format!("{value:016x}")
 }
 
 /// 32-char hex back to bytes.
@@ -581,12 +630,12 @@ pub fn apply_decision(
 
 /// Undoes the most recent decision, in the log and in the library.
 ///
-/// Returns the new state and the icon that changed, or `None` when there was
-/// nothing to undo.
+/// Returns the new state, the icon that changed and the state it was put back
+/// into, or `None` when there was nothing to undo.
 pub fn undo_decision(
     session: &mut ReviewSession,
     lib: &mut Library,
-) -> Result<Option<(TriageStateOut, [u8; 16])>, IsgError> {
+) -> Result<Option<UndoOutcome>, IsgError> {
     let Some((index, previous)) = session.log.undo() else {
         return Ok(None);
     };
@@ -596,9 +645,14 @@ pub fn undo_decision(
         )));
     };
     let at_ms = now_millis();
-    lib.set_review_state(icon, restored_action(previous), "undo")?;
+    let restored = restored_action(previous);
+    lib.set_review_state(icon, restored, "undo")?;
     lib.append_review_event(&log_key(&session.sheet), &LogEvent::Undo { at_ms }.encode())?;
-    Ok(Some((session.state(), icon)))
+    Ok(Some(UndoOutcome {
+        triage: session.state(),
+        icon,
+        restored,
+    }))
 }
 
 /// The library state a decision puts an icon in — one definition, shared with
@@ -681,10 +735,10 @@ pub fn review_out(report: &HostReview, session: &ReviewSession) -> ReviewOut {
                     colours: review.stat.colours,
                     solidity: review.stat.solidity,
                     fill_ratio: review.stat.fill_ratio,
-                    palette: review.stat.palette,
+                    palette: hex64_num(review.stat.palette),
                 },
-                d_hash: review.d_hash,
-                a_hash: review.a_hash,
+                d_hash: hex64_num(review.d_hash),
+                a_hash: hex64_num(review.a_hash),
                 digest: hex64(entry.review.digest),
                 state: state_name(session, entry.index),
                 cluster: cluster_of
@@ -705,7 +759,10 @@ pub fn review_out(report: &HostReview, session: &ReviewSession) -> ReviewOut {
         outliers: report
             .outliers
             .iter()
-            .map(|outlier| outlier_out(outlier.flag))
+            .map(|outlier| SheetOutlierOut {
+                icon: hex32(outlier.id),
+                flag: outlier_out(outlier.flag),
+            })
             .collect(),
         skipped: report
             .skipped
@@ -907,9 +964,10 @@ mod tests {
         decide(&mut live, &mut lib, 1, TriageActionDto::Approve);
         decide(&mut live, &mut lib, 2, TriageActionDto::Reject);
         decide(&mut live, &mut lib, 3, TriageActionDto::Flag);
-        let (state, changed) = undo_decision(&mut live, &mut lib)
+        let outcome = undo_decision(&mut live, &mut lib)
             .expect("an undo")
             .expect("something to undo");
+        let (state, changed) = (outcome.triage.clone(), outcome.icon);
         assert_eq!(changed, icon(3));
         assert_eq!(state.decided, 2);
         assert_eq!(state.counts, [1, 1, 0, 0, 0]);
@@ -972,11 +1030,17 @@ mod tests {
         decide(&mut live, &mut lib, 2, TriageActionDto::Approve);
         decide(&mut live, &mut lib, 2, TriageActionDto::Reject);
         assert_eq!(live.log.counts(), [0, 1, 0, 0, 0]);
-        let (state, changed) = undo_decision(&mut live, &mut lib)
+        let outcome = undo_decision(&mut live, &mut lib)
             .expect("undo")
             .expect("history");
+        let (state, changed) = (outcome.triage.clone(), outcome.icon);
         assert_eq!(changed, icon(2));
         assert_eq!(state.counts, [1, 0, 0, 0, 0], "the approve came back");
+        assert_eq!(
+            outcome.restored,
+            ReviewState::Approved,
+            "the undo says what the icon went back to"
+        );
         // The library agrees with the log: the undo restored the earlier state.
         assert_eq!(
             restored_action(Some(TriageDecision {
@@ -1177,6 +1241,12 @@ mod tests {
             }
         );
         assert_eq!(out.outliers.len(), 1);
+        assert_eq!(
+            out.outliers[0].icon,
+            hex32(icon(3)),
+            "a sheet-level deviation names the icon it is about"
+        );
+        assert_eq!(out.outliers[0].flag.kind, "stroke");
         assert_eq!(out.skipped.len(), 1);
         assert_eq!(out.skipped[0].id, hex32(icon(4)));
         assert_eq!(out.skipped[0].reason, "no ink in its box");
@@ -1212,6 +1282,15 @@ mod tests {
         assert_eq!(out.icons[2].state, "pending", "icon 3 has not been decided");
         assert_eq!(out.icons[0].score.composite, 0.97);
         assert_eq!(out.icons[0].stat.ink_size, 20.0);
+        // The hashes travel as text: `u64` is not exact in the webview.
+        assert_eq!(out.icons[0].d_hash, "0000000000000001");
+        assert_eq!(out.icons[0].a_hash, "0000000000000002");
+        assert_eq!(out.icons[0].stat.palette, "0000000000000005");
+        assert_eq!(
+            out.icons[0].d_hash.len(),
+            16,
+            "every hash is padded to one width, so a UI can align them"
+        );
         assert_eq!(out.icons[0].index, 0);
 
         // The triage state is the session's, and its `last` is the newest
@@ -1257,6 +1336,8 @@ mod tests {
         assert_eq!(parse_hex32(&"0".repeat(33)), None);
         assert_eq!(hex64([0xff; 32]).len(), 64);
         assert_eq!(hex32([0u8; 16]), "0".repeat(32));
+        assert_eq!(hex64_num(u64::MAX), "f".repeat(16));
+        assert_eq!(hex64_num(0), "0".repeat(16));
     }
 
     #[test]

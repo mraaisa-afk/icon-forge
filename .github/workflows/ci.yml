@@ -39,7 +39,12 @@ jobs:
         run: |
           npm ci
           npm run typecheck
-          npm run test
+          # The suite's `evidence:` lines go to their own file: the Rust step
+          # below overwrites target/test-evidence.txt, which would take the
+          # frontend's numbers with it, and the review workspace's evidence is
+          # the only record of the phase-6 UI half.
+          mkdir -p target
+          npm run test 2>&1 | tee target/ui-evidence.txt
           npm run build
 
       - name: Rust toolchain
@@ -158,6 +163,11 @@ jobs:
             target/test-evidence.txt 2>/dev/null \
             | grep -E 'separation|funnel|icons=|G1c|variants|decisions=' \
             | head -12 || true)
+          # The phase-6 *UI* half comes from the TypeScript suite, which writes
+          # its own file: the review workspace's keyboard table, its triage
+          # store and its browser fallback are what no Rust gate can see.
+          REVIEWUI=$(grep -hE 'evidence: review' \
+            target/ui-evidence.txt 2>/dev/null | head -20 || true)
           {
             echo "## Evidence (run-produced)"
             echo '```text'
@@ -167,6 +177,7 @@ jobs:
             printf '%s\n' "$PHASE5"
             printf '%s\n' "$PHASE6"
             printf '%s\n' "$PHASE6CRIT"
+            printf '%s\n' "$REVIEWUI"
             echo '```'
             echo '```json'
             tail -c 3000 target/spike-evidence.json 2>/dev/null || true
@@ -194,6 +205,7 @@ jobs:
           announce "Icon Forge phase 5 evidence" "$PHASE5"
           announce "Icon Forge phase 6 evidence" "$PHASE6"
           announce "Icon Forge phase 6 criteria" "$PHASE6CRIT"
+          announce "Icon Forge phase 6 review workspace" "$REVIEWUI"
 
       # Blocking since Phase 1 (was report-only in Phase 0): the dev sandbox
       # has no rustfmt, so formatting is verified here and fixed from the
