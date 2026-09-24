@@ -1,0 +1,129 @@
+# Icon Forge — Windows release build (Phase 7).
+#
+# §8's Phase-7 exit criterion is *"USB install with networking disabled works on
+# Windows"*. `ci.yml` proves the code half of that claim (no network capability
+# in the tree); this workflow produces the artifact the claim is about: an NSIS
+# installer with Microsoft's WebView2 offline installer embedded, so setup never
+# reaches for the network on the target machine.
+#
+# It runs on a tag or on demand. Nothing here signs the binary: §8's third
+# scheduling trap ("start code-signing paperwork in Phase 5") is still open
+# because it needs the vendor identity, so the steps that would sign are called
+# out rather than faked — an unsigned installer is usable, a fake signature is
+# not.name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to build (default: the selected branch)"
+        required: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-installer:
+    name: "Windows: NSIS installer with embedded WebView2 (offline install)"
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Rust toolchain (stable + wasm32 for the editor module)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target
+          key: cargo-windows-release-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-windows-
+
+      - name: Frontend dependencies
+        run: npm ci
+
+      # The window loads the editor as `isg_wasm.wasm` from the frontend
+      # directory, so the artifact has to be built *before* the frontend bundle
+      # is produced — otherwise the installer ships an app whose editor never
+      # loads. The step fails loudly if the module does not appear.
+      - name: Editor module into the frontend bundle
+        shell: bash
+        run: npm run wasm
+
+      # `beforeBuildCommand` in tauri.conf.json runs the frontend build
+      # (`tsc --noEmit && vite build`); the bundler then produces the NSIS
+      # setup executable. `--bundles nsis` matches `bundle.targets` and keeps a
+      # WiX/MSI build from being attempted on a runner without it configured.
+      # This downloads Microsoft's WebView2 *offline installer* (~127 MB) once,
+      # here on the runner, and embeds it in the artifact.
+      - name: Build the installer
+        shell: bash
+        run: npm run tauri build -- --bundles nsis
+
+      # The offline-install promise is only true if the bootstrapper is really
+      # embedded. That is not visible in the build log, but it is visible in the
+      # artifact: the embedded installer adds ~127 MB, so a few MB means the
+      # mode silently fell back to `downloadBootstrapper` and the USB stick
+      # would need a network connection on first install. Assert the size rather
+      # than trust the config.
+      - name: Verify the WebView2 offline installer is embedded
+        shell: bash
+        run: |
+          set -o pipefail
+          installer=$(ls target/release/bundle/nsis/*-setup.exe \
+                       src-tauri/target/release/bundle/nsis/*-setup.exe 2>/dev/null | head -1 || true)
+          if [ -z "$installer" ]; then
+            echo "no NSIS setup executable was produced" >&2
+            ls -R target/release/bundle src-tauri/target/release/bundle 2>/dev/null || true
+            exit 1
+          fi
+          bytes=$(stat -c %s "$installer" 2>/dev/null || wc -c < "$installer")
+          mb=$((bytes / 1024 / 1024))
+          digest=$(sha256sum "$installer" | cut -d' ' -f1)
+          # The offline WebView2 payload alone is ~127 MB; anything under 60 MB
+          # cannot contain it.
+          if [ "$mb" -lt 60 ]; then
+            echo "installer is $mb MB — too small to embed the WebView2 offline installer" >&2
+            exit 1
+          fi
+          {
+            echo "evidence: phase7 P1 installer=$(basename "$installer") bytes=$bytes mb=$mb"
+            echo "evidence: phase7 P2 webview2_offline=embedded install_mode=currentUser sha256=$digest"
+          } | tee target/release-evidence.txt
+          echo "::notice title=Icon Forge installer::$(
+            printf '%s' "$(cat target/release-evidence.txt)" \
+              | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
+          )"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: icon-forge-windows-nsis
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            target/release-evidence.txt
+          if-no-files-found: error
+          retention-days: 30
