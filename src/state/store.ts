@@ -20,6 +20,20 @@ import {
   type SensitivityDto,
   type SheetPreviewDto,
 } from "../lib/groupModel";
+import {
+  filterRows,
+  formatBytes,
+  nextRow,
+  orderRows,
+  patchState,
+  stateAfter,
+  type ReviewExportDto,
+  type ReviewFilter,
+  type ReviewOrder,
+  type ReviewOutDto,
+  type ReviewTriageDto,
+  type TriageActionName,
+} from "../lib/reviewModel";
 import type {
   SheetCsvDto,
   SheetCsvPreviewDto,
@@ -124,6 +138,54 @@ export interface UiState {
   exportSheet: (request: SheetExportRequest) => Promise<void>;
   /** Drops the plan when the wizard's controls change. */
   clearSheetPlan: () => void;
+
+  // Review workspace (§3.6) — the pass, the triage log and the export.
+  /** The last review pass for `selectedSheet`, or null before one runs. */
+  review: ReviewOutDto | null;
+  /** The sheet's triage log as `review_state` reads it — no pass required. */
+  reviewLog: ReviewTriageDto | null;
+  /** True while the workspace is showing (it takes the main area). */
+  reviewOpen: boolean;
+  /** True while a review command is in flight. */
+  reviewBusy: boolean;
+  /** What the last review command did, shown under the list. */
+  reviewNote: string | null;
+  /** The filter tab and the list order the reviewer chose. */
+  reviewFilter: ReviewFilter;
+  reviewOrder: ReviewOrder;
+  /** The cursor: an icon id, so it survives re-filtering and re-ordering. */
+  reviewSelected: string | null;
+  /** The icon whose sheet crop is pinned as the overlay, and that crop. */
+  reviewOverlay: string | null;
+  reviewCrop: string | null;
+  /** When this session's first pass ran — the pace line's clock. */
+  reviewStartedAt: number;
+  /** The last export, so the workspace can show the bytes and the path. */
+  reviewExported: ReviewExportDto | null;
+
+  /** Opens the workspace, reusing the cached pass unless `force` is set. */
+  openReview: (force?: boolean) => Promise<void>;
+  /** Closes the workspace (the pass and its decisions stay in the log). */
+  closeReview: () => void;
+  setReviewFilter: (filter: ReviewFilter) => void;
+  setReviewOrder: (order: ReviewOrder) => void;
+  /** Moves the cursor, skipping decided rows by default. */
+  moveReviewSelection: (delta: 1 | -1, skipDecided?: boolean) => void;
+  selectReviewIcon: (iconId: string) => void;
+  /** One triage decision; the backend's log is the authority, the row is patched. */
+  decideReview: (iconId: string, action: TriageActionName) => Promise<void>;
+  /** `Shift+A`: approves every row still undecided, one decision each. */
+  bulkApproveReview: () => Promise<void>;
+  /** `Ctrl+Z`: takes back the most recent decision. */
+  undoReview: () => Promise<void>;
+  /** Space: pins (or unpins) the sheet crop of one icon as the overlay. */
+  toggleReviewOverlay: (iconId?: string) => Promise<void>;
+  /** Re-reads the triage state — what a reload or a second window needs. */
+  refreshReviewState: () => Promise<void>;
+  /** Renders `review.csv`; without `outDir` it is a preview. */
+  exportReview: (outDir?: string) => Promise<void>;
+  /** Drops the workspace state when the sheet changes. */
+  clearReview: () => void;
 }
 
 function jobFromEvent(e: JobEvent): JobStatus | null {
@@ -178,6 +240,19 @@ export const useStore = create<UiState>((set, get) => ({
   sheetFiles: null,
   sheetGenBusy: false,
   sheetNote: null,
+
+  review: null,
+  reviewLog: null,
+  reviewOpen: false,
+  reviewBusy: false,
+  reviewNote: null,
+  reviewFilter: "all",
+  reviewOrder: "attention",
+  reviewSelected: null,
+  reviewOverlay: null,
+  reviewCrop: null,
+  reviewStartedAt: 0,
+  reviewExported: null,
 
   async openProject(path) {
     set({ busy: true, error: null });
@@ -267,6 +342,15 @@ export const useStore = create<UiState>((set, get) => ({
       sheetCsv: null,
       sheetFiles: null,
       sheetNote: null,
+      review: null,
+      reviewLog: null,
+      reviewOpen: false,
+      reviewNote: null,
+      reviewSelected: null,
+      reviewOverlay: null,
+      reviewCrop: null,
+      reviewExported: null,
+      reviewStartedAt: 0,
     });
     try {
       const icons = await backend().then((b) => b.sheetIcons(sheet.id));
@@ -291,6 +375,15 @@ export const useStore = create<UiState>((set, get) => ({
       sheetCsv: null,
       sheetFiles: null,
       sheetNote: null,
+      review: null,
+      reviewLog: null,
+      reviewOpen: false,
+      reviewNote: null,
+      reviewSelected: null,
+      reviewOverlay: null,
+      reviewCrop: null,
+      reviewExported: null,
+      reviewStartedAt: 0,
     });
   },
 
@@ -523,6 +616,291 @@ export const useStore = create<UiState>((set, get) => ({
 
   clearSheetPlan() {
     set({ sheetPlan: null, sheetCsv: null, sheetFiles: null, sheetNote: null });
+  },
+
+  // ---- Review workspace (§3.6) -------------------------------------------
+
+  async openReview(force) {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    const cached = get().review;
+    if (!force && cached && get().reviewOpen === false && cached.sheet === sheet.id) {
+      // Reopening a workspace whose pass is still cached must not cost the
+      // 17 s a real 1000-icon pass takes.
+      set({ reviewOpen: true, reviewNote: null });
+      return;
+    }
+    set({ reviewBusy: true, reviewOpen: true, error: null, reviewNote: null });
+    try {
+      const review = await backend().then((b) => b.reviewRun(sheet.id));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      const rows = orderRows(review.icons, get().reviewOrder);
+      set({
+        review,
+        reviewLog: review.triage,
+        reviewFilter: "all",
+        reviewSelected: rows.length > 0 ? rows[0].id : null,
+        reviewOverlay: null,
+        reviewCrop: null,
+        reviewExported: null,
+        reviewStartedAt: Date.now(),
+        reviewNote:
+          `${review.icons.length} icons reviewed · ${review.flagged} flagged · ` +
+          `${review.clusters.length} clusters · ${review.triage.decided} already decided`,
+      });
+    } catch (e) {
+      set({ error: String(e), reviewOpen: false });
+    } finally {
+      set({ reviewBusy: false });
+    }
+  },
+
+  closeReview() {
+    set({ reviewOpen: false, reviewOverlay: null, reviewCrop: null, reviewNote: null });
+  },
+
+  setReviewFilter(filter) {
+    const review = get().review;
+    set({ reviewFilter: filter });
+    if (!review) return;
+    const rows = filterRows(orderRows(review.icons, get().reviewOrder), filter);
+    const current = get().reviewSelected;
+    set({
+      reviewSelected: rows.some((row) => row.id === current) ? current : rows[0]?.id ?? null,
+    });
+  },
+
+  setReviewOrder(order) {
+    const review = get().review;
+    set({ reviewOrder: order });
+    if (!review) return;
+    const rows = orderRows(review.icons, order);
+    const current = get().reviewSelected;
+    const visible = filterRows(rows, get().reviewFilter);
+    set({
+      reviewSelected: visible.some((row) => row.id === current)
+        ? current
+        : visible[0]?.id ?? null,
+    });
+  },
+
+  moveReviewSelection(delta, skipDecided = true) {
+    const review = get().review;
+    if (!review) return;
+    const rows = filterRows(orderRows(review.icons, get().reviewOrder), get().reviewFilter);
+    set({ reviewSelected: nextRow(rows, get().reviewSelected, delta, skipDecided) });
+  },
+
+  selectReviewIcon(iconId) {
+    set({ reviewSelected: iconId });
+  },
+
+  async decideReview(iconId, action) {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    set({ reviewBusy: true, error: null });
+    try {
+      // The command needs the sheet and the icon id, not a rendered report: a
+      // decision is a journal row, so it must not depend on which screen is up.
+      const triage = await backend().then((b) => b.reviewApply(sheet.id, iconId, action));
+      const live = get().review;
+      if (get().selectedSheet?.id !== sheet.id) return;
+      if (!live) {
+        set({ reviewLog: triage, reviewNote: `${action} · ${triage.decided} decided` });
+        return;
+      }
+      // The log's state is the backend's answer; the row's chip is the action's
+      // own name, which is what `state_name` reads back off the log. Sequence
+      // numbers and `csvBytes` are never guessed here.
+      const patched = patchState({ ...live, triage }, iconId, stateAfter(action));
+      const rows = filterRows(orderRows(patched.icons, get().reviewOrder), get().reviewFilter);
+      set({
+        review: patched,
+        reviewLog: triage,
+        reviewSelected: nextRow(rows, iconId, 1),
+        reviewNote: `${action} · ${triage.decided} of ${patched.icons.length} decided`,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ reviewBusy: false });
+    }
+  },
+
+  async bulkApproveReview() {
+    const sheet = get().selectedSheet;
+    const review = get().review;
+    if (!sheet || !review) return;
+    const pending = review.icons.filter((icon) => icon.state === "pending");
+    if (pending.length === 0) {
+      set({ reviewNote: "nothing left undecided" });
+      return;
+    }
+    set({ reviewBusy: true, error: null });
+    try {
+      const b = await backend();
+      let triage = review.triage;
+      let done = 0;
+      for (const icon of pending) {
+        // One command per icon: the log's sequence numbers are its own, so
+        // batching them in the frontend would invent an order the audit trail
+        // then has to live with.
+        triage = await b.reviewApply(sheet.id, icon.id, "bulk-approve");
+        done += 1;
+        const live = get().review;
+        if (get().selectedSheet?.id !== sheet.id) return;
+        if (!live) return;
+        set({
+          review: patchState({ ...live, triage }, icon.id, stateAfter("bulk-approve")),
+          reviewNote: `bulk approve · ${done} of ${pending.length} · ${triage.decided} decided`,
+        });
+      }
+      const live = get().review;
+      if (live && get().selectedSheet?.id === sheet.id) {
+        const rows = filterRows(orderRows(live.icons, get().reviewOrder), get().reviewFilter);
+        set({
+          reviewSelected: rows.some((row) => row.id === get().reviewSelected)
+            ? get().reviewSelected
+            : rows[0]?.id ?? null,
+          reviewNote: `approved ${done} icon(s) in bulk · ${triage.decided} decided`,
+        });
+      }
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ reviewBusy: false });
+    }
+  },
+
+  async undoReview() {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    set({ reviewBusy: true, error: null });
+    try {
+      const undone = await backend().then((b) => b.reviewUndo(sheet.id));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      if (!undone) {
+        set({ reviewNote: "nothing left to undo" });
+        return;
+      }
+      const live = get().review;
+      if (!live) {
+        set({
+          reviewLog: undone.triage,
+          reviewNote: `undid the last decision · ${undone.restored}`,
+        });
+        return;
+      }
+      // The cursor goes back to the row that changed: the reviewer undid it to
+      // look at it again, not to keep walking.
+      const patched = patchState({ ...live, triage: undone.triage }, undone.icon, undone.restored);
+      set({
+        review: patched,
+        reviewLog: undone.triage,
+        reviewSelected: undone.icon,
+        reviewNote: `undid the last decision · ${undone.restored} · ${undone.triage.decided} decided`,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ reviewBusy: false });
+    }
+  },
+
+  async toggleReviewOverlay(iconId) {
+    const sheet = get().selectedSheet;
+    if (!sheet || !get().review) return;
+    // `Space` (§3.6) dismisses whatever is pinned; a click on a row's overlay
+    // button names its own icon and switches to it.
+    if (iconId === undefined && get().reviewOverlay !== null) {
+      set({ reviewOverlay: null, reviewCrop: null });
+      return;
+    }
+    const id = iconId ?? get().reviewSelected;
+    if (!id) return;
+    if (get().reviewOverlay === id) {
+      set({ reviewOverlay: null, reviewCrop: null });
+      return;
+    }
+    // The overlay is the icon's own pixels from the sheet. The review report has
+    // no bbox — it measures the traced document — but the library row does, and
+    // the two share the icon id, which is why the join is by id and not by index.
+    const tile = get().icons.find((icon) => icon.id === id);
+    const row = get().review?.icons.find((icon) => icon.id === id);
+    set({ reviewOverlay: id, reviewCrop: null });
+    if (!tile) {
+      set({ reviewNote: `no sheet row for ${id.slice(0, 6)}… — the icon list is empty or stale` });
+      return;
+    }
+    try {
+      const crop = await backend().then((b) =>
+        b.sheetCrop(sheet.id, tile.bbox[0], tile.bbox[1], tile.bbox[2], tile.bbox[3]),
+      );
+      if (get().reviewOverlay !== id) return;
+      set({
+        reviewCrop: crop,
+        reviewNote: row
+          ? `row ${row.index} · ${row.nodeCount} nodes · ${row.stat.stroke.toFixed(1)} px stroke · ` +
+            `${row.closed ? "closed" : "open"} outline`
+          : null,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  async refreshReviewState() {
+    const sheet = get().selectedSheet;
+    if (!sheet) return;
+    try {
+      // Cheap on purpose: `review_state` replays the journal, it does not run
+      // the detectors — so the drawer can say what a sheet's log already holds
+      // before anyone pays for a pass.
+      const triage = await backend().then((b) => b.reviewState(sheet.id));
+      if (get().selectedSheet?.id !== sheet.id) return;
+      const live = get().review;
+      set({ reviewLog: triage, ...(live ? { review: { ...live, triage } } : {}) });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  async exportReview(outDir) {
+    const sheet = get().selectedSheet;
+    if (!sheet || !get().review) return;
+    set({ reviewBusy: true, error: null });
+    try {
+      const out = await backend().then((b) =>
+        b.reviewExport(outDir ? { sheetId: sheet.id, outDir } : { sheetId: sheet.id }),
+      );
+      if (get().selectedSheet?.id !== sheet.id) return;
+      set({
+        reviewExported: out,
+        reviewNote: out.path
+          ? `wrote ${out.path} · ${out.decisions} decisions`
+          : `preview · ${out.decisions} decisions · ${formatBytes(out.csv.length)}`,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set({ reviewBusy: false });
+    }
+  },
+
+  clearReview() {
+    set({
+      review: null,
+      reviewLog: null,
+      reviewOpen: false,
+      reviewBusy: false,
+      reviewNote: null,
+      reviewFilter: "all",
+      reviewSelected: null,
+      reviewOverlay: null,
+      reviewCrop: null,
+      reviewExported: null,
+      reviewStartedAt: 0,
+    });
   },
 
   startEventPump() {

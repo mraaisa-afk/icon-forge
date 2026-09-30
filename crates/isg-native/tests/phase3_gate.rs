@@ -25,6 +25,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use isg_core::{Bbox, IconGroup};
 use isg_native::pipeline::{
@@ -32,6 +33,22 @@ use isg_native::pipeline::{
 };
 use rayon::prelude::*;
 use serde::Deserialize;
+
+/// Serialises the tests in this file, because they *measure time*.
+///
+/// Libtest runs a file's tests concurrently, and five of these build 4096² masks
+/// on a CI runner with four cores. Run 35920026511 read `max_ms=82.337` for a
+/// click whose own runner-up was 26.178 ms — four times a budget this test had
+/// met in every earlier run on the same runner class — while the cold C2 test
+/// (1964 ms median) was burning the same cores. The lock does not touch the
+/// 20 ms bar: it is what makes the bar the thing being measured. "Split Here
+/// costs twenty milliseconds" is a claim about a click, and a click costs that
+/// on an idle box.
+static GATE: Mutex<()> = Mutex::new(());
+
+fn gate_guard() -> MutexGuard<'static, ()> {
+    GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// One entry of a corpus truth sidecar (`bench/corpus/*.json`).
 #[derive(Debug, Deserialize)]
@@ -118,6 +135,7 @@ fn key(g: &IconGroup) -> (u32, u32, u32, u32, u32, (u32, u32)) {
 
 #[test]
 fn c2_cold_group_all_is_under_two_seconds_with_exactly_100_groups() {
+    let _gate = gate_guard();
     let seg = SegParams::default();
     let mut times = Vec::new();
     let mut groups = 0usize;
@@ -170,6 +188,7 @@ fn c2_cold_group_all_is_under_two_seconds_with_exactly_100_groups() {
 
 #[test]
 fn phase3_exit_criteria_hold_on_this_run() {
+    let _gate = gate_guard();
     let seg = SegParams::default();
 
     // C4 — rings and holes keep their exact boxes.
@@ -238,6 +257,7 @@ fn phase3_exit_criteria_hold_on_this_run() {
 
 #[test]
 fn split_here_stays_inside_its_twenty_millisecond_budget() {
+    let _gate = gate_guard();
     let seg = SegParams::default();
     let mut attempts = 0u32;
     let mut splits = 0u32;
@@ -288,6 +308,7 @@ fn split_here_stays_inside_its_twenty_millisecond_budget() {
 
 #[test]
 fn group_selected_merges_the_marquee_and_rescores() {
+    let _gate = gate_guard();
     let seg = SegParams::default();
     let mut session = GroupingSession::new(2);
     let (auto, _ms, _hit, truth) = group_through("12_c2_latency_grid", &mut session, &seg);
@@ -361,6 +382,7 @@ fn group_selected_merges_the_marquee_and_rescores() {
 
 #[test]
 fn sensitivity_slider_regroups_from_the_cached_mask() {
+    let _gate = gate_guard();
     let seg = SegParams::default();
     let mut session = GroupingSession::new(2);
     let (auto, cold_ms, hit, truth) = group_through("07_size_range", &mut session, &seg);
@@ -419,6 +441,7 @@ fn sensitivity_slider_regroups_from_the_cached_mask() {
 
 #[test]
 fn grouping_is_deterministic_across_sessions_and_thread_counts() {
+    let _gate = gate_guard();
     let seg = SegParams::default();
     let sheets = ["09_near_touching", "03_rings_holes", "12_c2_latency_grid"];
 
@@ -455,6 +478,7 @@ fn grouping_is_deterministic_across_sessions_and_thread_counts() {
 
 #[test]
 fn preview_is_deterministic_and_correctly_scaled() {
+    let _gate = gate_guard();
     let seg = SegParams::default();
     let (bytes, _) = load("12_c2_latency_grid");
     let out = isg_native::pipeline::segment(&bytes, 4096, &seg).expect("segment");

@@ -1,5 +1,6 @@
 import { Comparator } from "./Comparator";
 import { EditorGate } from "../editor/EditorGate";
+import { ReviewCard } from "../review/ReviewCard";
 import { GroupOverlay } from "./GroupOverlay";
 import { SheetExportCard } from "./SheetExportCard";
 import { useStore } from "../../state/store";
@@ -48,6 +49,8 @@ export function SheetPanel() {
       </div>
 
       <GroupOverlay />
+
+      <ReviewCard />
 
       <SheetExportCard />
 

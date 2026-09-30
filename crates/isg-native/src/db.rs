@@ -81,6 +81,18 @@ pub struct IconVectorRow {
     pub iou: f32,
 }
 
+/// One row of the review audit trail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewLogRow {
+    /// The key the row was filed under: an icon id for per-icon decisions, or a
+    /// review session's key for the triage log's own events.
+    pub icon_id: [u8; 16],
+    /// The recorded action (a triage action name, or an event payload).
+    pub action: String,
+    /// Unix milliseconds, stored as TEXT.
+    pub timestamp: String,
+}
+
 /// A paged sheet row for the library grid.
 #[derive(Debug, Clone)]
 pub struct SheetRow {
@@ -114,6 +126,23 @@ pub enum ReviewState {
 }
 
 impl ReviewState {
+    /// Parses [`ReviewState::as_str`] back; `None` for anything else.
+    ///
+    /// A row whose state cannot be read is reported as unknown rather than
+    /// silently treated as pending: the review list and the triage journal are
+    /// separate records, and a disagreement between them is worth seeing.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "pending" => Some(Self::Pending),
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
+            "flagged" => Some(Self::Flagged),
+            "duplicate" => Some(Self::Duplicate),
+            _ => None,
+        }
+    }
+
     /// Canonical lower-case name stored in the DB.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -408,6 +437,36 @@ impl Library {
         Ok(out)
     }
 
+    /// One sheet's icons and their review states, in `bbox_y, bbox_x` order —
+    /// the same order [`Library::icons_for_sheet`] returns, so a caller can zip
+    /// the two.
+    ///
+    /// A state the column holds but [`ReviewState::parse`] does not know is left
+    /// out of the list: "this icon has no readable state" is what the review
+    /// list should show, rather than inventing one.
+    pub fn review_states_for(
+        &self,
+        sheet_id: &[u8],
+    ) -> crate::Result<Vec<([u8; 16], ReviewState)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, review_state FROM icons WHERE sheet_id = ?1 ORDER BY bbox_y, bbox_x",
+        )?;
+        let mut out = Vec::new();
+        let mut rows = stmt.query(rusqlite::params![sheet_id])?;
+        while let Some(r) = rows.next()? {
+            let raw: Vec<u8> = r.get(0)?;
+            let mut id = [0u8; 16];
+            if raw.len() == 16 {
+                id.copy_from_slice(&raw);
+            }
+            let state: String = r.get(1)?;
+            if let Some(state) = ReviewState::parse(&state) {
+                out.push((id, state));
+            }
+        }
+        Ok(out)
+    }
+
     /// Replaces one sheet's icon rows with `rows` (deterministic grouping
     /// makes the set stable, so delete+insert is idempotent). One
     /// transaction; `review_state` resets to `pending` for fresh rows.
@@ -469,6 +528,45 @@ impl Library {
             .conn
             .query_row("SELECT COUNT(*) FROM icons", [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
+    }
+
+    /// Appends one audit row without touching any icon's state.
+    ///
+    /// Used for events whose subject is the *review session* rather than one
+    /// icon: the triage log's own journal, which `set_review_state`'s per-icon
+    /// rows cannot express (they carry no sequence number). The same table, with
+    /// the session key in the `icon_id` column.
+    pub fn append_review_event(&self, key: &[u8], action: &str) -> crate::Result<()> {
+        self.conn.execute(
+            "INSERT INTO review_log (icon_id, action, timestamp) VALUES (?1, ?2, ?3)",
+            rusqlite::params![key, action, now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Every audit row recorded under one key, oldest first.
+    ///
+    /// `id` is the `AUTOINCREMENT` primary key, so rows come back in insertion
+    /// order even when two share a millisecond.
+    pub fn review_log_for(&self, key: &[u8]) -> crate::Result<Vec<ReviewLogRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT icon_id, action, timestamp FROM review_log WHERE icon_id = ?1 ORDER BY id",
+        )?;
+        let mut out = Vec::new();
+        let mut rows = stmt.query(rusqlite::params![key])?;
+        while let Some(r) = rows.next()? {
+            let raw: Vec<u8> = r.get(0)?;
+            let mut icon_id = [0u8; 16];
+            if raw.len() == 16 {
+                icon_id.copy_from_slice(&raw);
+            }
+            out.push(ReviewLogRow {
+                icon_id,
+                action: r.get(1)?,
+                timestamp: r.get(2)?,
+            });
+        }
+        Ok(out)
     }
 
     /// Sets an icon's review state and appends to the audit log.

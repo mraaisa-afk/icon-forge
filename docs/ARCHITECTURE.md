@@ -280,6 +280,124 @@ Plus keyboard triage: `A`pprove / `R`eject / `F`lag / `D`uplicate / `Space` over
 
 **The Phase 4 exit criterion's host walk is raised to 10 000 randomised sequences** (§8 logs this as 4C's, and the walk now covers the five point-edit opcodes too, drawing each address from the geometry that exists at that moment). The 4C evidence line reports 25 host ABI tests, and the wasm smoke test walks 318 edits through the built artifact including point edits, booleans and SVG import in both directions.
 
+### 3.10 Review system as built (Phase 6)
+
+**The detectors are pure; only the pixels are native.** Everything §3.6 defines a threshold for — the quality flags, the duplicate cascade's control flow, the modified z-scores, the triage log — lives in `isg-native::review`, which has no renderer, no image decoder and no external crate, so all of it is unit-tested without a corpus. The half that needs a renderer is `isg-native::review_native`: it normalises each icon into a 64 × 64 cell and hands the planes to the cascade. The seam between them is plain data (`HashItem`, `IconStat`, `Score`), which is why the cascade can be measured at 1000 icons without a sheet.
+
+**One normalised cell defines what an icon "looks like".** The cell is rendered at 2× and box-filtered down, with the **longest side fitted and the aspect preserved** — stretching each icon to the full square would map a 40 × 20 rectangle and a 40 × 40 square onto the same pixels and the cascade would call them duplicates. The reduction to an ink-evidence plane (distance from the sheet's background after compositing) is the same rule stage ⑧ uses, so a pixel outside the ink is 0 by construction and the hashes, IoU and Hausdorff distance all read one plane.
+
+**The cascade may only narrow.** dHash (9 × 8 gradient) and aHash (8 × 8 mean) over the cell, banded into four 16-bit LSH keys each, propose candidate pairs in `O(n)` instead of `O(n²)`; ink IoU ≥ 0.92 **or** normalised Hausdorff ≤ 0.02 (a two-pass chamfer over the cell, symmetric and divided by the cell diagonal) verifies a candidate; and only an identical blake3 digest of the cell or SSIM ≥ 0.97 confirms it. Nothing is reported as a duplicate on a hash match alone — that is where precision comes from — and the SSIM is `pipeline::score::compare_planes`, the *same* metric stage ⑧ scores with, made public for the purpose: two implementations that could round differently would make an icon "a duplicate" in the review and "not a duplicate" in its own quality score.
+
+**What the duplicate criterion is measured against, and what it is not.** §3.6's
+cascade is a *near-identity* detector: the confirm stage asks for an SSIM of 0.97
+on the 64-cell, which is sub-pixel agreement. The C9 corpus sheet is a shape set
+with ±2 px size jitter and a stroke drawn from a range per shape, so its four
+copies of a shape are four *drawings*: all four circles sit in the same 47 px box
+yet their traced cells hold 2968 and 3133 ink pixels — two tracings 2.7 % apart
+in radius — and the four rings' cells hold 1285 to 1490. The two classes
+therefore overlap on this sheet: the worst same-shape pair scores IoU 0.686,
+which is *less* similar than the best different-shape pair at 0.765, so no IoU
+bar separates them; the Hausdorff does separate them (3.31 % vs 8.92 %), but only
+above the 2 % bar; the SSIM only above 0.59, which is not a meaningful SSIM. The
+gate's truth is what the design can promise — **the same tracing**, byte for
+byte, derived from the documents the shipping path produced rather than from the
+cascade's own plane digests. That class is smaller than the sheet looks: its
+sixteen icons are not sixteen tracings (G1 measures four byte-identical pairs
+among them — icons 1 and 14 are one drawing), so the 1000-icon test builds its
+document classes from the bytes and prints their sizes instead of assuming one
+document per icon. The 10 variant pairs are reported with their metrics instead
+of being asserted either way, and the cell is fitted to the icon's **ink box** —
+longest side scaled to fill it, centred — so *size* is not what separates two
+copies of one shape either: G1's three squares, in boxes of 46, 48 and 50 px,
+print one hash pair and 4096 of 4096 cell pixels of ink, because each of them is
+its own ink box and each therefore fills the cell. Two drawings of one shape at
+different sizes are likewise one class the cascade *reports* and the gate does
+not judge. (Found the direct way: R3's first surface fixture used a 56 px and a
+32 px rectangle as if they were two different documents, and all four icons came
+back as one cluster; the fixture now uses two different drawings.) Precision is measured where the
+labels name different artwork: on `15_c9_duplicates`, a merge that crosses a
+shape is what costs it and the same-shape variant merges are printed rather than
+scored, and on `12_c2_latency_grid`'s 100 icons of ten shapes at similar sizes,
+where the cascade must produce no cluster that mixes two shapes and no
+cross-shape pair may pass both stages inside §3.6's bars — the closest
+cross-shape pair's three metrics are printed so the margin is visible. Both
+sheets also print the raw figure (0.2857 on C9 and 0.3599 at a thousand icons on
+the run that first scored them — what the bar reads if the unjudged variant
+merges are counted as errors) and the size of the judged set, so the exclusion is
+a measurement rather than a hole.
+(The chamfer transform behind the Hausdorff figure was found broken by this work
+and fixed in Phase 6: its backward sweep was guarded so it never relaxed a pixel
+the forward sweep had reached, which made a 1.33 px wall difference read as
+17 px — see the `hausdorff_sees_a_thin_wall_as_thin` unit test.)
+
+**Outliers use MAD, with the fallback that matters.** Modified z-scores `0.6745·(x − median)/MAD` above 3.5 over ink size, stroke, node count, colours and solidity, plus modal style/palette mismatch when one class covers at least half the sheet. The fallback is the point: the MAD is **zero** exactly when more than half the sheet is identical — the roadmap's own *"99 icons are 2 px outline, one is a filled blob"* — so a zero MAD falls back to the mean absolute deviation (Iglewicz & Hoaglin), and a sheet where every value is equal reports no outliers instead of dividing by zero.
+
+**The triage log is state, not a list.** At most one decision per icon, each timestamped and sequence-numbered; `undo` restores *the decision it replaced* (a flag that was then rejected goes back to flagged, not to undecided); sequence numbers never go backwards, so `review.csv` is stable and its rows are chronological regardless of the ids. The export round-trips through the sheet module's own `parse_csv`. An imported log deliberately has no undo history: the keystrokes that produced the file are not in it.
+
+**The log is rebuilt from a journal, so triage survives a restart.** Every decision and every undo is appended to `review_log` as an event — `review/apply action=<name> index=<row> seq=<n> at=<ms>` or `review/undo at=<ms>` — filed under a 17-byte key (`0x52` then the sheet id), which no 16-byte icon id can equal: one sheet's session and its own icons' audit rows share the table without ever sharing a key. Loading a session replays that sheet's events through the same `TriageLog` the live pass used, and *verifies* each event's recorded sequence number against the number the replay hands out — a journal that does not reproduce its own numbering is reported as corruption rather than replayed into a plausible-looking log. Undo is an event like any other, so a session that closed mid-review reopens with the same decisions *and* the same undo stack, and the icon's `review_state` column is written in the same step (a decision sets it; an undo restores what the replaced decision had put there, or `pending`).
+
+**The workspace is the triage surface, and it is decisions rather than pixels.** The
+screen takes the main area while it is open and virtualizes its list with the same
+`virtualWindow` arithmetic the library grid uses, because §8's target is 1000 icons and a
+browser that lays out 1000 rows on every keystroke is what makes a triage session slow.
+§3.6's six chords are bound at the window — `A` / `R` / `F` / `D`, `Space` for the sheet
+crop overlay, `Shift+A` to approve what is left, `Ctrl+Z` to undo — plus `↑`/`↓` (or
+`j`/`k`) to move, `Esc` to dismiss, and `Shift+E` for a CSV preview. The bare letter is
+required on purpose: `Ctrl+R` reloads a browser tab and `Cmd+A` selects a page, so a
+command that also took them would either never fire or fire while the reviewer was doing
+something else. Keystrokes aimed at a text field are ignored, which is what keeps the
+export path box from approving icons as it is typed into. All of it — the chord table,
+the filter tabs, the ordering, the pace projection — lives in `src/lib/reviewModel.ts` as
+pure functions, because vitest's environment here is node and a shortcut table only
+exercisable by mounting a browser is not exercisable at all.
+
+**The cursor and the filters are the reviewer's, the log's numbers are the backend's.**
+The list is ordered worst-first (a non-keeper cluster member, then a quality flag, then a
+deviation, then anything undecided, then the decided rows) with ties broken by sheet row,
+so two runs of one report show the same list; the tabs filter it by what the detectors
+found and carry their counts. After a decision the cursor steps over rows that are
+already decided and never wraps — reaching the end and stopping is how the screen says
+"that is the sheet" — and an undo puts it back on the row it changed, because undoing is
+how a reviewer looks at something again rather than how they walk the list. The row's chip
+is patched locally so the list does not flicker, but the *state* is the command's answer:
+`sequence` numbers and `csvBytes` are never computed in TypeScript, and an undone row is
+repainted from the `restored` field of the undo's own reply, since `TriageStateOut::last`
+after an undo may name another icon entirely. The pass is a command rather than a job, it
+is cached per sheet (reopening the workspace does not pay 17 s again), and a decision does
+not need it at all: `review_state` replays the journal, so the card can say what a sheet
+already holds before anyone runs anything.
+
+**Two contract tests pin the bridge, because the names are the interface.** `dHash`,
+`aHash` and `stat.palette` reach the webview as 16-char hex rather than as `u64`s — JSON
+numbers stop being exact at 2⁵³, and a hash is an identity rather than a quantity, so two
+values differing in their low bits must not arrive equal — and the sheet-level deviation
+list carries its icon's id (`SheetOutlierOut` flattens the deviation beside it) so a
+reader can attribute what it is reading. Those names come from
+`#[serde(rename_all = "camelCase")]`, a derive rather than a literal, so
+`the_dtos_serialize_with_the_names_the_workspace_reads` serialises a full report and
+asserts the key set of every DTO (including that `last` is absent, not null, when nothing
+has been decided), and `src/lib/reviewModel.test.ts` pins the TypeScript side field by
+field with a record keyed by `keyof` each interface; both print their list as CI evidence.
+The workspace's own layout is still verified by the build and by running it, not by a
+renderer test — that is the honest boundary of a node-environment suite, and adding a DOM
+environment is a separate decision rather than a line in this one.
+
+**The quality composite comes from stage ⑧ at 2× cell.** `LowQuality` is defined on the composite, so the review calls `score_svg` — the sheet's real crop at 2× cell against the icon's own document — rather than re-deriving the metric at another scale, which would let the review panel disagree with the score the user already sees next to the same icon. `OverComplex` compares the outline's segment count against `4·√ink-area`, and an icon with no ink is never over-complex (its budget is zero).
+
+### 3.11 Hardening & release as built (Phase 7)
+
+**Derived data may be lost; the project may not.** The cache stores only recomputable payloads, so `cache::get` reports a *miss* — never an error — for all three recoverable cases: no row, a row whose file has vanished, and a file that will not decompress. A scratched sector therefore costs one re-trace instead of a vectorize job that cannot run, and the caller's next `put` overwrites the bad bytes at the same path, which is what makes the cache self-healing. The project file gets the opposite treatment: the open path runs `PRAGMA quick_check` and checks the schema version *after* opening, because a 90 %-truncated database opens cleanly (measured) and a bare open would then migrate garbage into what looks like an empty library. A garbage file is refused by name and left byte-identical on disk; a zero-byte file is a new project, because an empty file is a legitimate first save rather than damage.
+
+**Crash leftovers are inert, and the session is bounded — not just the batch.** A save writes `<target>.tmp-<pid>` and renames; a crash between the two leaves a file that is never read as a project and is swept before the next save. `tests/resilience.rs` asserts each property directly — six tests, evidence `H1`–`H5` — covering a corrupt payload, a vanished payload file, a garbage project, a half- and a 90 %-truncated project, a leftover temporary, and a crash snapshot whose committed rows live in the WAL. `tests/long_session.rs` bounds the *session*: six sheets through one open library, read from the process's own RSS in its own test binary (RSS is per-process, so other suites must not share it). Measured 8 → 10 MB across the session with a 15 MB peak, against 512 MB growth / 2 GB peak budgets. The assertion is deliberately loose — allocators do not return pages reliably — and the per-sheet readings print every run, so drift is visible before it is fatal (`M1`).
+
+**"Offline" is verified, not asserted.** `tools/offline_check.py` establishes that the app holds no network capability by three independent routes. (1) Every manifest in the tree is checked for a declared socket/HTTP dependency, and `cargo tree` is checked for the packages we wrote; the shell's own resolved tree is reported as framework stack rather than failed, and `Cargo.lock` is not used as the gate because it is feature-independent — it lists optional dependencies of `tauri` that a build never enables, so failing on those would be wrong rather than stricter. (2) Our source is scanned for socket APIs, off-origin fetches and remote URLs, with the one allow-listed fetch (`isg_wasm.wasm`, same origin) re-derived from the constant that feeds it and unresolvable targets failing closed. (3) `tauri.conf.json` is checked for a remote origin or a CSP that could reach the network. The gate is itself verified: `tools/offline_check_selftest.py` re-introduces six network capabilities one at a time and requires a rejection for the stated reason, because a check that has never failed is not evidence. Current reading: nothing declared, nothing reachable from our graph, one same-origin fetch, CSP unset (`O1`–`O4`).
+
+**The installer carries the runtime it needs, and the evidence looks inside it.** The NSIS bundle embeds Microsoft's WebView2 *offline* installer (`webviewInstallMode: offlineInstaller`) rather than the default `downloadBootstrapper`, and installs per-user (`nsis.installMode: currentUser`) so setup needs no elevation — the "USB install with networking disabled" criterion depends on exactly this. Two checks keep it honest: the artifact is asserted to be large enough to contain the ~203 MiB payload, and 7-Zip lists the shipped setup's contents so the payload appears by name and size (`P1`–`P3`). `scripts/build-wasm.mjs` places the editor module in `public/` before the frontend build; without it the packaged app opens with no editor at all, a failure only a bundled build reveals.
+
+**The installer is built where it can actually be triggered.** `release.yml` (tag, or manual dispatch) and `ci.yml` (verification tag `v0.0.0-verify*`, or manual dispatch) share one reusable definition, because a workflow file that exists only on an unmerged branch cannot be dispatched and its tag trigger is not reliable either — GitHub registers workflows from the default branch. Same definition, two entry points: the artifact a verification build produces is the artifact a release will ship.
+
+**Accessibility on the surface that is keyboard-driven.** The review workspace's semantics are part of the product, not decoration: icon rows are named list items, each glyph button carries the action and the icon it applies to and announces its shortcut, the workspace is a named landmark, and the progress line is a live region — the triage loop's only feedback now says what it did. `src/components/review/a11y.test.tsx` renders the row to static markup and the workspace through a client render; that split *is* the DOM-environment decision §3.10 deferred. The store's server snapshot is the state it was created with, so a static render of a connected component can only ever show the initial screen. jsdom is a devDependency for that one file; every other suite still runs in `node`.
+
 ---
 
 ## 4. Data Model (sketch)
@@ -325,8 +443,9 @@ CREATE TABLE cache (
 
 CREATE TABLE review_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    icon_id       BLOB NOT NULL,
-    action        TEXT NOT NULL,      -- approve|reject|flag|duplicate|undo
+    icon_id       BLOB NOT NULL,      -- a 16-byte icon id, or 0x52||sheet id for a session
+    action        TEXT NOT NULL,      -- approve|reject|flag|duplicate|undo, or a
+                                      -- review/apply|review/undo session event (see §3.6)
     timestamp     TEXT NOT NULL
 );
 ```
@@ -487,6 +606,8 @@ No platform types (`std::fs::File`, `tauri::*`, thread handles) may appear in an
 - **CI matrix (Windows-first, per user constraint)**: build + `cargo test` + `cargo check --target wasm32-unknown-unknown -p isg-core` + `cargo deny check` on every push.
 - **Perf regression gate**: benchmark harness runs the C1–C10 corpus and fails CI if latency exceeds the Phase 8 budget table by >20%.
 - **Frontend**: `tsc --noEmit`, component tests for the editor's undo/redo invariant (`undo(do(x)) == x`).
+- **Offline gate (Phase 7)**: `tools/offline_check.py` runs on both legs and proves the tree holds no network capability (dependency graph, our own source, `tauri.conf.json`); `tools/offline_check_selftest.py` runs on the quick leg and proves the gate *can* fail, by re-introducing six network capabilities one at a time and requiring rejection for the stated reason. Evidence `O1`–`O6`.
+- **Installer verification (Phase 7)**: `release.yml` builds the NSIS bundle with the WebView2 offline installer embedded, then asserts the artifact is large enough to contain it and lists its contents with 7-Zip so the payload appears by name (`P1`–`P3`). Verification builds run from `v0.0.0-verify*` tags (or on demand) because a workflow that exists only on an unmerged branch cannot be dispatched.
 
 ---
 

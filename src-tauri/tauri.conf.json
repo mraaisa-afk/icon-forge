@@ -24,13 +24,27 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "Icon Forge",
+    "shortDescription": "Offline icon sheet vectorizer, grouper and triage workspace",
+    "longDescription": "Icon Forge vectorizes raster icon sheets into editable SVG, groups scattered icons into bounded units, levels them to a consistent set, and provides a keyboard-driven review workspace and sheet exporter. It runs entirely offline.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.png",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

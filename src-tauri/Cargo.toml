@@ -18,7 +18,13 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# Pinned to the npm side's minor on purpose: the Tauri CLI refuses to bundle
+# when the `tauri` crate and `@tauri-apps/api` are not on the same major/minor,
+# and this workspace does not commit Cargo.lock, so a bare "2" silently floats
+# (measured: it moved 2.11 -> 2.12.1 between two otherwise identical runs and
+# broke the installer build). Keep this in step with package.json; the tilde
+# still takes patch releases of the same minor.
+tauri = { version = "~2.12.1", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
