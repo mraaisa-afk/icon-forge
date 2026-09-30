@@ -5,9 +5,23 @@ vectorize raster icon sheets to SVG, auto-group, auto-level, export.
 Tauri 2 + Rust + React/TypeScript. Windows desktop first.
 
 Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (source of truth
-for all phases).
+for all phases; §3.11 covers the hardening and release work).
 
-## Phase 0 (current)
+## Current state — Phase 7 (Hardening & Release)
+
+Phases 0–7 are implemented. Phase 7 added the hardening and release surface:
+
+* **Crash resilience & memory** — failure-injection tests over the project file and the cache (corrupt, truncated, vanished, leftover temporary, crash snapshot), plus a session-memory bound (`cargo test -p isg-native`).
+* **Offline verification** — `python3 tools/offline_check.py` proves the tree holds no network capability, and `tools/offline_check_selftest.py` proves the gate *can* fail.
+* **Packaging** — `npm run wasm` then `npm run tauri build -- --bundles nsis` produces a per-user NSIS installer with Microsoft's WebView2 runtime embedded, so it installs on a machine with no network. To build one from CI, push a tag matching `v0.0.0-verify*` (or run the `Installer` job on demand); the artifact is `icon-forge-windows-nsis`.
+* **Accessibility** — the review workspace's rows, buttons, shortcuts and progress line are exposed to assistive technology and verified by rendering (`vitest`).
+
+Beta test script — install it offline, what to try, what to report:
+[`docs/BETA.md`](docs/BETA.md). The installer is **unsigned**, and the human
+offline-install trial and the NPS score are the open Phase-7 items alongside
+code signing.
+
+## Phase 0 foundations (historical)
 
 Foundations + spike. Deliverables in this tree:
 
