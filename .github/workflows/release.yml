@@ -67,6 +67,14 @@ jobs:
           restore-keys: |
             cargo-windows-
 
+      # The Cargo cache below restores `target/`, which includes the evidence
+      # file from a previous run. Without this the publish step can announce a
+      # previous build's P1/P2 on a *failed* build — observed on 2026-09-30, when
+      # a version-mismatch failure still published a passing-looking notice.
+      - name: Clear any evidence restored from the cache
+        shell: bash
+        run: rm -f target/release-evidence.txt
+
       - name: Frontend dependencies
         run: npm ci
 
